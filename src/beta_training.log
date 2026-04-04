@@ -1,0 +1,95 @@
+Using device: cpu
+Loading data...
+Loading model...
+
+============================================================
+[1] Evaluating with Fixed Alpha (α=3.0)...
+============================================================
+Results for: Fixed Alpha (α=3.0)
+============================================================
+  Hit@1: 0.0011
+  Hit@3: 0.0028
+  Hit@10: 0.0072
+  MR: 1171.1718
+  MRR: 0.0058
+
+============================================================
+[2] Evaluating with Learnable Beta (untrained)...
+============================================================
+Results for: Learnable Beta (untrained)
+============================================================
+  Hit@1: 0.0051
+  Hit@3: 0.0102
+  Hit@10: 0.0309
+  MR: 901.9887
+  MRR: 0.0161
+
+Beta Statistics (per-relation weight for rule score):
+  Mean:   0.5000
+  Std:    0.0000
+  Min:    0.5000
+  Max:    0.5000
+  Median: 0.5000
+
+[3] Training beta for 5 epochs on validation set...
+
+Epoch 1/5:
+  Loss: 0.8484
+  Valid MRR: 0.0487
+  Valid Hit@10: 0.0964
+  ✓ New best MRR!
+
+Epoch 2/5:
+  Loss: 0.8284
+  Valid MRR: 0.1332
+  Valid Hit@10: 0.2711
+  ✓ New best MRR!
+
+Epoch 3/5:
+  Loss: 0.8124
+  Valid MRR: 0.2187
+  Valid Hit@10: 0.4289
+  ✓ New best MRR!
+
+Epoch 4/5:
+  Loss: 0.8026
+  Valid MRR: 0.2807
+  Valid Hit@10: 0.5287
+  ✓ New best MRR!
+
+Epoch 5/5:
+  Loss: 0.7965
+  Valid MRR: 0.3239
+  Valid Hit@10: 0.5967
+  ✓ New best MRR!
+
+Best validation MRR: 0.3239
+
+============================================================
+[4] Evaluating Trained Beta on Test Set...
+============================================================
+Results for: Learnable Beta (trained)
+============================================================
+  Hit@1: 0.2083
+  Hit@3: 0.3903
+  Hit@10: 0.6104
+  MR: 220.4643
+  MRR: 0.3377
+
+Beta Statistics (per-relation weight for rule score):
+  Mean:   0.8926
+  Std:    0.0926
+  Min:    0.4909
+  Max:    0.9660
+  Median: 0.9116
+
+============================================================
+SUMMARY COMPARISON
+============================================================
+Metric     Fixed α      Beta (pre)   Beta (post)  Improvement
+--------------------------------------------------------------
+Hit@1      0.0011       0.0051       0.2083       +0.2072
+Hit@3      0.0028       0.0102       0.3903       +0.3875
+Hit@10     0.0072       0.0309       0.6104       +0.6032
+MR         1171.1718    901.9887     220.4643     -950.7075
+MRR        0.0058       0.0161       0.3377       +0.3319

@@ -1,0 +1,176 @@
+2026-01-10 21:45:23 INFO     read 2400 rules from list.
+2026-01-10 21:45:23 INFO     >>>>> ruleE: Pre-training
+2026-01-10 21:45:25 INFO     Training average positive_fact_loss at step 0: 2.496400
+2026-01-10 21:45:25 INFO     Training average negative_fact_loss at step 0: 0.112524
+2026-01-10 21:45:25 INFO     Training average positive_rule_loss at step 0: 0.650355
+2026-01-10 21:45:25 INFO     Training average negative_rule_loss at step 0: 0.708284
+2026-01-10 21:45:25 INFO     Training average regularization at step 0: 0.084880
+2026-01-10 21:45:25 INFO     Training average loss at step 0: 2.068661
+2026-01-10 21:45:25 INFO     Evaluating on Valid Dataset...
+2026-01-10 21:45:25 INFO     >>>>> RuleE emb: Evaluating on valid
+2026-01-10 21:47:54 INFO     Data : 4076
+2026-01-10 21:47:54 INFO     Hit1 : 0.001227
+2026-01-10 21:47:54 INFO     Hit3 : 0.002208
+2026-01-10 21:47:54 INFO     Hit10: 0.004661
+2026-01-10 21:47:54 INFO     MR   : 1533.577159
+2026-01-10 21:47:54 INFO     MRR  : 0.003944
+2026-01-10 21:47:56 INFO     Training average positive_fact_loss at step 10: 2.474912
+2026-01-10 21:47:56 INFO     Training average negative_fact_loss at step 10: 0.107857
+2026-01-10 21:47:56 INFO     Training average positive_rule_loss at step 10: 0.677698
+2026-01-10 21:47:56 INFO     Training average negative_rule_loss at step 10: 0.699625
+2026-01-10 21:47:56 INFO     Training average regularization at step 10: 0.085842
+2026-01-10 21:47:56 INFO     Training average loss at step 10: 2.065888
+2026-01-10 21:47:57 INFO     Training average positive_fact_loss at step 20: 2.482869
+2026-01-10 21:47:57 INFO     Training average negative_fact_loss at step 20: 0.105203
+2026-01-10 21:47:57 INFO     Training average positive_rule_loss at step 20: 0.668093
+2026-01-10 21:47:57 INFO     Training average negative_rule_loss at step 20: 0.702813
+2026-01-10 21:47:57 INFO     Training average regularization at step 20: 0.086015
+2026-01-10 21:47:57 INFO     Training average loss at step 20: 2.065504
+2026-01-10 21:47:57 INFO     Training average positive_fact_loss at step 30: 2.501598
+2026-01-10 21:47:57 INFO     Training average negative_fact_loss at step 30: 0.102443
+2026-01-10 21:47:57 INFO     Training average positive_rule_loss at step 30: 0.660962
+2026-01-10 21:47:57 INFO     Training average negative_rule_loss at step 30: 0.707926
+2026-01-10 21:47:57 INFO     Training average regularization at step 30: 0.086194
+2026-01-10 21:47:57 INFO     Training average loss at step 30: 2.072659
+2026-01-10 21:48:08 INFO     Training average positive_fact_loss at step 40: 2.480141
+2026-01-10 21:48:08 INFO     Training average negative_fact_loss at step 40: 0.103406
+2026-01-10 21:48:08 INFO     Training average positive_rule_loss at step 40: 0.659351
+2026-01-10 21:48:08 INFO     Training average negative_rule_loss at step 40: 0.707807
+2026-01-10 21:48:08 INFO     Training average regularization at step 40: 0.085934
+2026-01-10 21:48:08 INFO     Training average loss at step 40: 2.061287
+2026-01-10 21:48:09 INFO     Change learning_rate to 0.000010 at step 50
+2026-01-10 21:48:09 INFO     Training average positive_fact_loss at step 50: 2.456902
+2026-01-10 21:48:09 INFO     Training average negative_fact_loss at step 50: 0.103867
+2026-01-10 21:48:09 INFO     Training average positive_rule_loss at step 50: 0.666623
+2026-01-10 21:48:09 INFO     Training average negative_rule_loss at step 50: 0.704668
+2026-01-10 21:48:09 INFO     Training average regularization at step 50: 0.085753
+2026-01-10 21:48:09 INFO     Training average loss at step 50: 2.051784
+2026-01-10 21:48:09 INFO     Evaluating on Valid Dataset...
+2026-01-10 21:48:09 INFO     >>>>> RuleE emb: Evaluating on valid
+2026-01-10 21:50:36 INFO     Data : 4076
+2026-01-10 21:50:36 INFO     Hit1 : 0.001717
+2026-01-10 21:50:36 INFO     Hit3 : 0.003189
+2026-01-10 21:50:36 INFO     Hit10: 0.007115
+2026-01-10 21:50:36 INFO     MR   : 1370.639720
+2026-01-10 21:50:36 INFO     MRR  : 0.005200
+2026-01-10 21:50:37 INFO     Training average positive_fact_loss at step 60: 2.465176
+2026-01-10 21:50:37 INFO     Training average negative_fact_loss at step 60: 0.103877
+2026-01-10 21:50:37 INFO     Training average positive_rule_loss at step 60: 0.662561
+2026-01-10 21:50:37 INFO     Training average negative_rule_loss at step 60: 0.706953
+2026-01-10 21:50:37 INFO     Training average regularization at step 60: 0.085477
+2026-01-10 21:50:37 INFO     Training average loss at step 60: 2.054760
+2026-01-10 21:50:38 INFO     Training average positive_fact_loss at step 70: 2.472013
+2026-01-10 21:50:38 INFO     Training average negative_fact_loss at step 70: 0.103861
+2026-01-10 21:50:38 INFO     Training average positive_rule_loss at step 70: 0.668874
+2026-01-10 21:50:38 INFO     Training average negative_rule_loss at step 70: 0.704175
+2026-01-10 21:50:38 INFO     Training average regularization at step 70: 0.085523
+2026-01-10 21:50:38 INFO     Training average loss at step 70: 2.059984
+2026-01-10 21:50:49 INFO     Training average positive_fact_loss at step 80: 2.481005
+2026-01-10 21:50:49 INFO     Training average negative_fact_loss at step 80: 0.103182
+2026-01-10 21:50:49 INFO     Training average positive_rule_loss at step 80: 0.661262
+2026-01-10 21:50:49 INFO     Training average negative_rule_loss at step 80: 0.706735
+2026-01-10 21:50:49 INFO     Training average regularization at step 80: 0.085687
+2026-01-10 21:50:49 INFO     Training average loss at step 80: 2.061779
+2026-01-10 21:50:50 INFO     Training average positive_fact_loss at step 90: 2.429640
+2026-01-10 21:50:50 INFO     Training average negative_fact_loss at step 90: 0.103844
+2026-01-10 21:50:50 INFO     Training average positive_rule_loss at step 90: 0.662156
+2026-01-10 21:50:50 INFO     Training average negative_rule_loss at step 90: 0.707799
+2026-01-10 21:50:50 INFO     Training average regularization at step 90: 0.085284
+2026-01-10 21:50:50 INFO     Training average loss at step 90: 2.037004
+2026-01-10 21:50:50 INFO     Training average positive_fact_loss at step 100: 2.465213
+2026-01-10 21:50:50 INFO     Training average negative_fact_loss at step 100: 0.103000
+2026-01-10 21:50:50 INFO     Training average positive_rule_loss at step 100: 0.664034
+2026-01-10 21:50:50 INFO     Training average negative_rule_loss at step 100: 0.705444
+2026-01-10 21:50:50 INFO     Training average regularization at step 100: 0.085503
+2026-01-10 21:50:50 INFO     Training average loss at step 100: 2.054348
+2026-01-10 21:50:50 INFO     Evaluating on Valid Dataset...
+2026-01-10 21:50:50 INFO     >>>>> RuleE emb: Evaluating on valid
+2026-01-10 21:53:17 INFO     Data : 4076
+2026-01-10 21:53:17 INFO     Hit1 : 0.001717
+2026-01-10 21:53:17 INFO     Hit3 : 0.003435
+2026-01-10 21:53:17 INFO     Hit10: 0.007605
+2026-01-10 21:53:17 INFO     MR   : 1353.749877
+2026-01-10 21:53:17 INFO     MRR  : 0.005375
+2026-01-10 21:53:17 INFO     Finishing pre-training!
+2026-01-10 21:53:17 INFO     Test the results of pre-training
+2026-01-10 21:53:17 INFO     >>>>> RuleE emb: Evaluating on valid
+2026-01-10 21:55:45 INFO     Data : 4076
+2026-01-10 21:55:45 INFO     Hit1 : 0.001717
+2026-01-10 21:55:45 INFO     Hit3 : 0.003435
+2026-01-10 21:55:45 INFO     Hit10: 0.007605
+2026-01-10 21:55:45 INFO     MR   : 1353.749877
+2026-01-10 21:55:45 INFO     MRR  : 0.005375
+2026-01-10 21:55:45 INFO     >>>>> RuleE emb: Evaluating on test
+2026-01-10 21:59:09 INFO     Data : 5670
+2026-01-10 21:59:09 INFO     Hit1 : 0.001058
+2026-01-10 21:59:09 INFO     Hit3 : 0.002293
+2026-01-10 21:59:09 INFO     Hit10: 0.004056
+2026-01-10 21:59:09 INFO     MR   : 1324.339594
+2026-01-10 21:59:09 INFO     MRR  : 0.004241
+2026-01-10 21:59:09 INFO     >>>>> RulE: Grounding-Training
+2026-01-10 21:59:09 INFO     -------------------------
+2026-01-10 21:59:09 INFO     | Iteration: 1/2
+2026-01-10 21:59:09 INFO     -------------------------
+2026-01-10 21:59:12 INFO     loss:    10 5878 7.906751 24056.0
+2026-01-10 21:59:12 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:13 INFO     loss:    20 5878 7.841353 24056.0
+2026-01-10 21:59:13 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:13 INFO     loss:    30 5878 7.830505 24056.0
+2026-01-10 21:59:13 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:13 INFO     loss:    40 5878 7.952871 24056.0
+2026-01-10 21:59:13 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:14 INFO     loss:    50 5878 7.753689 24056.0
+2026-01-10 21:59:14 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:14 INFO     >>>>> Predictor: Evaluating on valid
+2026-01-10 21:59:33 INFO     Data : 4076
+2026-01-10 21:59:33 INFO     Hit1 : 0.262880
+2026-01-10 21:59:33 INFO     Hit3 : 0.444308
+2026-01-10 21:59:33 INFO     Hit10: 0.696516
+2026-01-10 21:59:33 INFO     MR   : 339.632605
+2026-01-10 21:59:33 INFO     MRR  : 0.395776
+2026-01-10 21:59:33 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:33 INFO     -------------------------
+2026-01-10 21:59:33 INFO     | Iteration: 2/2
+2026-01-10 21:59:33 INFO     -------------------------
+2026-01-10 21:59:36 INFO     loss:    10 5878 7.848759 24056.0
+2026-01-10 21:59:36 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:36 INFO     loss:    20 5878 7.787815 24056.0
+2026-01-10 21:59:36 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:36 INFO     loss:    30 5878 7.772810 24056.0
+2026-01-10 21:59:36 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:37 INFO     loss:    40 5878 7.896906 24056.0
+2026-01-10 21:59:37 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:37 INFO     loss:    50 5878 7.690625 24056.0
+2026-01-10 21:59:37 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:37 INFO     >>>>> Predictor: Evaluating on valid
+2026-01-10 21:59:56 INFO     Data : 4076
+2026-01-10 21:59:56 INFO     Hit1 : 0.281771
+2026-01-10 21:59:56 INFO     Hit3 : 0.474485
+2026-01-10 21:59:56 INFO     Hit10: 0.739941
+2026-01-10 21:59:56 INFO     MR   : 188.379661
+2026-01-10 21:59:56 INFO     MRR  : 0.422775
+2026-01-10 21:59:56 INFO     Save checkpoint to ../outputs/family_quick_test/grounding.pt
+2026-01-10 21:59:56 INFO     -------------------------
+2026-01-10 21:59:56 INFO     | Final Test MRR: 0.422775
+2026-01-10 21:59:56 INFO     -------------------------
+2026-01-10 21:59:56 INFO     >>>>> Predictor: Evaluating on valid
+2026-01-10 22:00:14 INFO     Data : 4076
+2026-01-10 22:00:14 INFO     Hit1 : 0.281771
+2026-01-10 22:00:14 INFO     Hit3 : 0.474485
+2026-01-10 22:00:14 INFO     Hit10: 0.739941
+2026-01-10 22:00:14 INFO     MR   : 188.379661
+2026-01-10 22:00:14 INFO     MRR  : 0.422775
+2026-01-10 22:00:14 INFO     >>>>> Predictor: Evaluating on test
+2026-01-10 22:00:37 INFO     Data : 5670
+2026-01-10 22:00:37 INFO     Hit1 : 0.287919
+2026-01-10 22:00:37 INFO     Hit3 : 0.485538
+2026-01-10 22:00:37 INFO     Hit10: 0.738624
+2026-01-10 22:00:37 INFO     MR   : 190.146208
+2026-01-10 22:00:37 INFO     MRR  : 0.428807
+2026-01-10 22:00:37 INFO     >>>>> Predictor: Evaluating on test_kge
+2026-01-10 22:04:20 INFO     Data : 5670
+2026-01-10 22:04:20 INFO     Hit1 : 0.001058
+2026-01-10 22:04:20 INFO     Hit3 : 0.002822
+2026-01-10 22:04:20 INFO     Hit10: 0.007231
+2026-01-10 22:04:20 INFO     MR   : 1171.171781
+2026-01-10 22:04:20 INFO     MRR  : 0.005810
