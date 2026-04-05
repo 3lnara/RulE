@@ -501,9 +501,7 @@ class KnowledgeGraph(object):
         r_flag = (-1) ** (relation // num_relations)
         rel_emb = relation_emb[r_idx] * r_flag
 
-        src_emb = entity_emb[node_in].detach()
-        dst_emb = entity_emb[node_out].detach()
-        edge_attn = attn_fn(src_emb, dst_emb, rel_emb, node_out, x.size(0))
+        edge_attn = attn_fn(entity_emb.detach(), node_in, node_out, rel_emb, x.size(0))
 
         message = x[node_in]
         E, B, D = message.size()

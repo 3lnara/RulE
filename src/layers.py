@@ -108,11 +108,11 @@ class GroundingGAT(nn.Module):
     scalar quality scores.
     """
 
-    def __init__(self, entity_dim, relation_dim, attn_dim=None, negative_slope=0.2):
+    def __init__(self, entity_dim, relation_dim, attn_dim=128, negative_slope=0.2):
         super(GroundingGAT, self).__init__()
 
         if attn_dim is None:
-            attn_dim = relation_dim
+            attn_dim = 128
 
         self.attn_dim = attn_dim
         self.negative_slope = negative_slope
@@ -134,21 +134,33 @@ class GroundingGAT(nn.Module):
         nn.init.xavier_uniform_(self.conf_proj.weight)
         nn.init.zeros_(self.conf_proj.bias)
 
-    def compute_edge_attention(self, src_emb, dst_emb, rel_emb, node_out, num_nodes):
+    def compute_edge_attention(self, entity_emb, node_in, node_out, rel_emb, num_nodes):
         """
         Compute GATv2 attention for each edge, normalized per target node.
 
+        Projects all entity embeddings to attn_dim first (cheap: num_entities rows),
+        then indexes by edge, avoiding large [num_edges, entity_dim] materialization.
+
         Args:
-            src_emb:  [num_edges, entity_dim]
-            dst_emb:  [num_edges, entity_dim]
-            rel_emb:  [relation_dim]  (single vector, broadcast over edges)
-            node_out: [num_edges]  target node indices (for scatter_softmax)
-            num_nodes: int  total number of nodes
+            entity_emb: [num_entities, entity_dim]
+            node_in:    [num_edges]  source node indices
+            node_out:   [num_edges]  target node indices (for scatter_softmax)
+            rel_emb:    [relation_dim]  (single vector, broadcast over edges)
+            num_nodes:  int  total number of nodes
 
         Returns:
             edge_attn: [num_edges]  attention weight per edge, sums to 1 per target
         """
-        proj = self.W_src(src_emb) + self.W_dst(dst_emb) + self.W_rel(rel_emb)
+        # Project all entities to attn_dim first, then index by edge endpoints.
+        # This avoids creating [num_edges, entity_dim] copies that would be stored
+        # for the backward pass; backward of W_src/W_dst uses entity_emb which is
+        # already resident in GPU memory.
+        all_src_proj = F.linear(entity_emb, self.W_src.weight)  # [num_entities, attn_dim]
+        all_dst_proj = F.linear(entity_emb, self.W_dst.weight)  # [num_entities, attn_dim]
+        src_proj = all_src_proj[node_in]   # [num_edges, attn_dim]
+        dst_proj = all_dst_proj[node_out]  # [num_edges, attn_dim]
+
+        proj = src_proj + dst_proj + self.W_rel(rel_emb)
         proj = F.leaky_relu(proj, negative_slope=self.negative_slope)
         edge_score = self.attn_vec(proj).squeeze(-1)            # [num_edges]
         edge_attn = scatter_softmax(edge_score, node_out, dim=0, dim_size=num_nodes)
