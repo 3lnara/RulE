@@ -41,7 +41,7 @@ echo ""
 # ── Run comparison ─────────────────────────────────────────────────────────────
 # Stage 1+2A: original RulE (MLP grounding) — pre-trains from scratch
 # Stage 2B:   new RulE with GAT grounding   — reuses the checkpoint above
-cd "$HOME/RulE/src"
+cd "$HOME/RulE/scripts"
 python3 run_comparison.py --config ../config/family_comparison_hpc.json
 
 echo ""
