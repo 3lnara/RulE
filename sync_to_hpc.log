@@ -2274,3 +2274,1712 @@ Result       : Transfer completed successfully
 Sync ended   : 2026-04-04 11:11:57
 ========================================
 
+========================================
+Sync started : 2026-04-05 18:12:46
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+rsync(19502): error: /Users/elnararb/Documents/TUe/Thesis/RulE/src/run_comparison.py: (l)stat: No such file or directory
+data.py
+          24970 100%   15.47MB/s   00:00:00 (xfer#1, to-check=0/6)
+layers.py
+           6593 100%  716.75KB/s   00:00:00 (xfer#2, to-check=1/6)
+main.py
+           7297 100%    9.53MB/s   00:00:00 (xfer#3, to-check=2/6)
+rsync(19502): error: /Users/elnararb/Documents/TUe/Thesis/RulE/src/run_comparison.py: (l)stat: No such file or directory
+<f..t.... data.py
+<f..t.... layers.py
+<f..t.... main.py
+Number of files: 6
+Number of files transferred: 3
+Total file size: 94856 B
+Total transferred file size: 38860 B
+Unmatched data: 0 B
+Matched data: 38860 B
+File list size: 235 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 653 B
+Total received: 428 B
+
+sent 653 bytes  received 428 bytes  11737 bytes/sec
+total size is 94856  speedup is 87.75
+Number of files: 6
+Number of files transferred: 3
+Total file size: 94856 B
+Total transferred file size: 38860 B
+Unmatched data: 0 B
+Matched data: 38860 B
+File list size: 235 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 653 B
+Total received: 428 B
+
+sent 653 bytes  received 428 bytes  11737 bytes/sec
+total size is 94856  speedup is 87.75
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  18181 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  18181 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  10859 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  10859 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+rule_comparison_gpu.slurm
+           2056 100%    1.39MB/s   00:00:00 (xfer#1, to-check=0/2)
+<f.st.... rule_comparison_gpu.slurm
+Number of files: 2
+Number of files transferred: 1
+Total file size: 6704 B
+Total transferred file size: 2056 B
+Unmatched data: 656 B
+Matched data: 1400 B
+File list size: 127 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 482 B
+Total received: 60 B
+
+sent 482 bytes  received 60 bytes  14225 bytes/sec
+total size is 6704  speedup is 12.37
+Number of files: 2
+Number of files transferred: 1
+Total file size: 6704 B
+Total transferred file size: 2056 B
+Unmatched data: 656 B
+Matched data: 1400 B
+File list size: 127 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 482 B
+Total received: 60 B
+
+sent 482 bytes  received 60 bytes  14225 bytes/sec
+total size is 6704  speedup is 12.37
+
+========================================
+Result       : FAILED (one or more groups had errors)
+Sync ended   : 2026-04-05 18:12:47
+========================================
+
+========================================
+Sync started : 2026-04-05 18:14:14
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 103 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 277 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 293 B
+Total received: 20 B
+
+sent 293 bytes  received 20 bytes  9750 bytes/sec
+total size is 103k  speedup is 330.05
+Number of files: 7
+Number of files transferred: 0
+Total file size: 103 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 277 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 293 B
+Total received: 20 B
+
+sent 293 bytes  received 20 bytes  9750 bytes/sec
+total size is 103k  speedup is 330.05
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19935 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19935 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  11245 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  11245 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+gat_grounding_only.slurm
+           2876 100%    4.81MB/s   00:00:00 (xfer#1, to-check=0/3)
+<f+++++++ gat_grounding_only.slurm
+Number of files: 3
+Number of files transferred: 1
+Total file size: 9580 B
+Total transferred file size: 2876 B
+Unmatched data: 2876 B
+Matched data: 0 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 1225 B
+Total received: 42 B
+
+sent 1225 bytes  received 42 bytes  38277 bytes/sec
+total size is 9580  speedup is 7.56
+Number of files: 3
+Number of files transferred: 1
+Total file size: 9580 B
+Total transferred file size: 2876 B
+Unmatched data: 2876 B
+Matched data: 0 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 1225 B
+Total received: 42 B
+
+sent 1225 bytes  received 42 bytes  38277 bytes/sec
+total size is 9580  speedup is 7.56
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-05 18:14:15
+========================================
+
+========================================
+Sync started : 2026-04-05 18:15:39
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  9644 bytes/sec
+total size is 94856  speedup is 350.02
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  9644 bytes/sec
+total size is 94856  speedup is 350.02
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/scripts/ ---
+run_comparison.py
+           8450 100%    6.13MB/s   00:00:00 (xfer#1, to-check=0/1)
+<f+++++++ run_comparison.py
+Number of files: 1
+Number of files transferred: 1
+Total file size: 8450 B
+Total transferred file size: 8450 B
+Unmatched data: 8450 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.001 seconds
+File list transfer time: 0.003 seconds
+Total sent: 2543 B
+Total received: 42 B
+
+sent 2543 bytes  received 42 bytes  78096 bytes/sec
+total size is 8450  speedup is 3.27
+Number of files: 1
+Number of files transferred: 1
+Total file size: 8450 B
+Total transferred file size: 8450 B
+Unmatched data: 8450 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.001 seconds
+File list transfer time: 0.003 seconds
+Total sent: 2543 B
+Total received: 42 B
+
+sent 2543 bytes  received 42 bytes  78096 bytes/sec
+total size is 8450  speedup is 3.27
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19935 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19935 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  11245 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  11245 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+Number of files: 3
+Number of files transferred: 0
+Total file size: 9580 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 192 B
+Total received: 20 B
+
+sent 192 bytes  received 20 bytes  8122 bytes/sec
+total size is 9580  speedup is 45.19
+Number of files: 3
+Number of files transferred: 0
+Total file size: 9580 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 192 B
+Total received: 20 B
+
+sent 192 bytes  received 20 bytes  8122 bytes/sec
+total size is 9580  speedup is 45.19
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-05 18:15:40
+========================================
+
+========================================
+Sync started : 2026-04-05 18:23:57
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.005 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  7947 bytes/sec
+total size is 94856  speedup is 350.02
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.005 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  7947 bytes/sec
+total size is 94856  speedup is 350.02
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/scripts/ ---
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  4367 bytes/sec
+total size is 8450  speedup is 74.12
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  4367 bytes/sec
+total size is 8450  speedup is 74.12
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19935 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19935 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  11245 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  11245 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5704 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5704 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+gat_grounding_only.slurm
+           4313 100%    4.66MB/s   00:00:00 (xfer#1, to-check=0/3)
+<f.st.... gat_grounding_only.slurm
+Number of files: 3
+Number of files transferred: 1
+Total file size: 11017 B
+Total transferred file size: 4313 B
+Unmatched data: 2913 B
+Matched data: 1400 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 1185 B
+Total received: 72 B
+
+sent 1185 bytes  received 72 bytes  31346 bytes/sec
+total size is 11017  speedup is 8.76
+Number of files: 3
+Number of files transferred: 1
+Total file size: 11017 B
+Total transferred file size: 4313 B
+Unmatched data: 2913 B
+Matched data: 1400 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 1185 B
+Total received: 72 B
+
+sent 1185 bytes  received 72 bytes  31346 bytes/sec
+total size is 11017  speedup is 8.76
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-05 18:23:58
+========================================
+
+========================================
+Sync started : 2026-04-05 20:44:45
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  7720 bytes/sec
+total size is 94856  speedup is 350.02
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  7720 bytes/sec
+total size is 94856  speedup is 350.02
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/scripts/ ---
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  4367 bytes/sec
+total size is 8450  speedup is 74.12
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  4367 bytes/sec
+total size is 8450  speedup is 74.12
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  17174 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  17174 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  9266 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  9266 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5704 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5704 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+Number of files: 3
+Number of files transferred: 0
+Total file size: 11017 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 192 B
+Total received: 20 B
+
+sent 192 bytes  received 20 bytes  7544 bytes/sec
+total size is 11017  speedup is 51.97
+Number of files: 3
+Number of files transferred: 0
+Total file size: 11017 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 192 B
+Total received: 20 B
+
+sent 192 bytes  received 20 bytes  7544 bytes/sec
+total size is 11017  speedup is 51.97
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-05 20:44:46
+========================================
+
+========================================
+Sync started : 2026-04-05 20:49:08
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  8187 bytes/sec
+total size is 94856  speedup is 350.02
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  8187 bytes/sec
+total size is 94856  speedup is 350.02
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/scripts/ ---
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  4056 bytes/sec
+total size is 8450  speedup is 74.12
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  4056 bytes/sec
+total size is 8450  speedup is 74.12
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19314 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  19314 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  10498 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  10498 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5514 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5514 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+gat_grounding_only.slurm
+           4313 100%    1.80MB/s   00:00:00 (xfer#1, to-check=0/3)
+<f..t.... gat_grounding_only.slurm
+Number of files: 3
+Number of files transferred: 1
+Total file size: 11017 B
+Total transferred file size: 4313 B
+Unmatched data: 700 B
+Matched data: 3613 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 498 B
+Total received: 84 B
+
+sent 498 bytes  received 84 bytes  13503 bytes/sec
+total size is 11017  speedup is 18.93
+Number of files: 3
+Number of files transferred: 1
+Total file size: 11017 B
+Total transferred file size: 4313 B
+Unmatched data: 700 B
+Matched data: 3613 B
+File list size: 176 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 498 B
+Total received: 84 B
+
+sent 498 bytes  received 84 bytes  13503 bytes/sec
+total size is 11017  speedup is 18.93
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-05 20:49:09
+========================================
+
+========================================
+Sync started : 2026-04-05 20:50:17
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  8713 bytes/sec
+total size is 94856  speedup is 350.02
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  8713 bytes/sec
+total size is 94856  speedup is 350.02
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/scripts/ ---
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  3917 bytes/sec
+total size is 8450  speedup is 74.12
+Number of files: 1
+Number of files transferred: 0
+Total file size: 8450 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 78 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 94 B
+Total received: 20 B
+
+sent 94 bytes  received 20 bytes  3917 bytes/sec
+total size is 8450  speedup is 74.12
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  20598 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  20598 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  10498 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  10498 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+adaptive_beta_only.slurm
+           5469 100%    9.88MB/s   00:00:00 (xfer#1, to-check=0/4)
+<f+++++++ adaptive_beta_only.slurm
+Number of files: 4
+Number of files transferred: 1
+Total file size: 16486 B
+Total transferred file size: 5469 B
+Unmatched data: 5469 B
+Matched data: 0 B
+File list size: 225 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 2125 B
+Total received: 42 B
+
+sent 2125 bytes  received 42 bytes  61737 bytes/sec
+total size is 16486  speedup is 7.61
+Number of files: 4
+Number of files transferred: 1
+Total file size: 16486 B
+Total transferred file size: 5469 B
+Unmatched data: 5469 B
+Matched data: 0 B
+File list size: 225 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.002 seconds
+Total sent: 2125 B
+Total received: 42 B
+
+sent 2125 bytes  received 42 bytes  61737 bytes/sec
+total size is 16486  speedup is 7.61
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-05 20:50:18
+========================================
+
+========================================
+Sync started : 2026-04-06 19:14:33
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  6437 bytes/sec
+total size is 94856  speedup is 350.02
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.003 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  6437 bytes/sec
+total size is 94856  speedup is 350.02
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/scripts/ ---
+compare_balancing.py
+          12561 100%    4.42MB/s   00:00:00 (xfer#1, to-check=0/5)
+parse_gat_metrics.py
+          12570 100%   11.44MB/s   00:00:00 (xfer#2, to-check=1/5)
+test_learnable_beta.py
+           8203 100%   14.35MB/s   00:00:00 (xfer#3, to-check=3/5)
+train_beta_grounding.py
+          14163 100%   17.32MB/s   00:00:00 (xfer#4, to-check=4/5)
+<f+++++++ compare_balancing.py
+<f+++++++ parse_gat_metrics.py
+<f+++++++ test_learnable_beta.py
+<f+++++++ train_beta_grounding.py
+Number of files: 5
+Number of files transferred: 4
+Total file size: 55947 B
+Total transferred file size: 47497 B
+Unmatched data: 47497 B
+Matched data: 0 B
+File list size: 263 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 13910 B
+Total received: 108 B
+
+sent 13910 bytes  received 108 bytes  177k bytes/sec
+total size is 55947  speedup is 3.99
+Number of files: 5
+Number of files transferred: 4
+Total file size: 55947 B
+Total transferred file size: 47497 B
+Unmatched data: 47497 B
+Matched data: 0 B
+File list size: 263 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 13910 B
+Total received: 108 B
+
+sent 13910 bytes  received 108 bytes  177k bytes/sec
+total size is 55947  speedup is 3.99
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  13449 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  13449 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  8517 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.003 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  8517 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5704 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  5704 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+Number of files: 4
+Number of files transferred: 0
+Total file size: 16486 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 225 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 241 B
+Total received: 20 B
+
+sent 241 bytes  received 20 bytes  9288 bytes/sec
+total size is 16486  speedup is 63.16
+Number of files: 4
+Number of files transferred: 0
+Total file size: 16486 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 225 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 241 B
+Total received: 20 B
+
+sent 241 bytes  received 20 bytes  9288 bytes/sec
+total size is 16486  speedup is 63.16
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-06 19:14:35
+========================================
+
+========================================
+Sync started : 2026-04-06 19:56:38
+Destination  : 20252643@hpc.tue.nl:~/RulE
+Mode         : LIVE
+========================================
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/src/ ---
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  6930 bytes/sec
+total size is 94856  speedup is 350.02
+Number of files: 6
+Number of files transferred: 0
+Total file size: 94856 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 235 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 251 B
+Total received: 20 B
+
+sent 251 bytes  received 20 bytes  6930 bytes/sec
+total size is 94856  speedup is 350.02
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/scripts/ ---
+compare_balancing.py
+          12645 100%    7.21MB/s   00:00:00 (xfer#1, to-check=0/5)
+test_learnable_beta.py
+           8276 100% 1019.81KB/s   00:00:00 (xfer#2, to-check=3/5)
+train_beta_grounding.py
+          14247 100%   11.17MB/s   00:00:00 (xfer#3, to-check=4/5)
+<f.st.... compare_balancing.py
+<f.st.... test_learnable_beta.py
+<f.st.... train_beta_grounding.py
+Number of files: 5
+Number of files transferred: 3
+Total file size: 56188 B
+Total transferred file size: 35168 B
+Unmatched data: 2341 B
+Matched data: 32827 B
+File list size: 263 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 1845 B
+Total received: 392 B
+
+sent 1845 bytes  received 392 bytes  27583 bytes/sec
+total size is 56188  speedup is 25.12
+Number of files: 5
+Number of files transferred: 3
+Total file size: 56188 B
+Total transferred file size: 35168 B
+Unmatched data: 2341 B
+Matched data: 32827 B
+File list size: 263 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.004 seconds
+Total sent: 1845 B
+Total received: 392 B
+
+sent 1845 bytes  received 392 bytes  27583 bytes/sec
+total size is 56188  speedup is 25.12
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/RulE_original/src/ ---
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  18181 bytes/sec
+total size is 125k  speedup is 202.06
+Number of files: 13
+Number of files transferred: 0
+Total file size: 125 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 584 B
+File list generation time: 0.004 seconds
+File list transfer time: 0.004 seconds
+Total sent: 600 B
+Total received: 20 B
+
+sent 600 bytes  received 20 bytes  18181 bytes/sec
+total size is 125k  speedup is 202.06
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/data/family/ ---
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  9844 bytes/sec
+total size is 488k  speedup is 1544.52
+Number of files: 7
+Number of files transferred: 0
+Total file size: 488 kB
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 280 B
+File list generation time: 0.002 seconds
+File list transfer time: 0.004 seconds
+Total sent: 296 B
+Total received: 20 B
+
+sent 296 bytes  received 20 bytes  9844 bytes/sec
+total size is 488k  speedup is 1544.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/RulE/config/ ---
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+Number of files: 2
+Number of files transferred: 0
+Total file size: 1912 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 130 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.003 seconds
+Total sent: 146 B
+Total received: 20 B
+
+sent 146 bytes  received 20 bytes  6125 bytes/sec
+total size is 1912  speedup is 11.52
+
+--- Syncing to 20252643@hpc.tue.nl:~/ ---
+Number of files: 4
+Number of files transferred: 0
+Total file size: 16486 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 225 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.005 seconds
+Total sent: 241 B
+Total received: 20 B
+
+sent 241 bytes  received 20 bytes  10000 bytes/sec
+total size is 16486  speedup is 63.16
+Number of files: 4
+Number of files transferred: 0
+Total file size: 16486 B
+Total transferred file size: 0 B
+Unmatched data: 0 B
+Matched data: 0 B
+File list size: 225 B
+File list generation time: 0.003 seconds
+File list transfer time: 0.005 seconds
+Total sent: 241 B
+Total received: 20 B
+
+sent 241 bytes  received 20 bytes  10000 bytes/sec
+total size is 16486  speedup is 63.16
+
+========================================
+Result       : Transfer completed successfully
+Sync ended   : 2026-04-06 19:56:40
+========================================
+

@@ -3,6 +3,8 @@ Train beta parameter during grounding phase (after main model is trained).
 This allows learning optimal KGE/Rule score balance per relation without retraining the full model.
 """
 import os
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import argparse
 import torch
 import torch.nn as nn

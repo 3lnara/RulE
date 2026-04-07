@@ -4,6 +4,7 @@ Uses the integrated learnable beta in model.forward().
 """
 import os
 import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
 import argparse
 import torch
 from torch.utils.data import DataLoader
