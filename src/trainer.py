@@ -455,9 +455,6 @@ class GroundTrainer(object):
         test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
-
-
-       
        
 
     def train_step(self, optimizer, train_dataloader, batch_per_epoch, smoothing, print_every, args):
@@ -471,8 +468,6 @@ class GroundTrainer(object):
         total_size = 0.0
 
         for batch_id, batch in enumerate(islice(train_dataloader, batch_per_epoch)):
-            # 归一化
-
             # self.model.beta.requires_grad = False
             # self.model.beta.data = self.model.beta / self.model.beta.sum(dim=-1,keepdim=True)
             # self.model.beta.requires_grad = True
@@ -496,12 +491,23 @@ class GroundTrainer(object):
             target = target * smoothing + target_t * (1 - smoothing)
             
             grounding_rule_score, mask = model(all_h, all_r, edges_to_remove)
-
+            if batch_id == 0:
+                for name, module in self.model.grounding_gat.named_modules():
+                    if hasattr(module, 'last_attn'):  # only if you cache it
+                        attn = module.last_attn
+                        logging.info(f"attn std={attn.std():.4f}, min={attn.min():.4f}, max={attn.max():.4f}")
             if mask.sum().item() != 0:
                 rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
 
                 loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
                 loss.backward()
+
+                if batch_id == 0:
+                    for name, param in self.model.grounding_gat.named_parameters():
+                        if param.grad is None:
+                            logging.info(f"NO GRAD: {name}")
+                        else:
+                            logging.info(f"{name}: grad_norm={param.grad.norm().item():.6f}")
 
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)

@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=gat_grounding_only
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=2-00:00:00
+#SBATCH --gres=gpu:v100:1
+#SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -84,10 +85,6 @@ TRAIN_RC=$?
 TRAIN_END=$(date +%s)
 TRAIN_WALL=$(( TRAIN_END - TRAIN_START ))
 
-# Stop GPU monitor
-kill "${GPU_MON_PID}" 2>/dev/null
-wait "${GPU_MON_PID}" 2>/dev/null
-
 echo ""
 echo "Training exit code : ${TRAIN_RC}"
 printf "Training wall time : %dh%02dm%02ds\n" \
@@ -104,7 +101,6 @@ echo ""
 echo "=== Per-iteration metrics ==="
 python3 "$HOME/RulE/scripts/parse_gat_metrics.py" \
     --log  "${SAVE_PATH}/run.log" \
-    --gpu_log "${GPU_LOG}" \
     --out  "${SAVE_PATH}/metrics_table.txt"
 
 echo ""

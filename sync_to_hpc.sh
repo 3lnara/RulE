@@ -127,9 +127,15 @@ run_rsync "${DEST_BASE}/data/family/" \
   "${SCRIPT_DIR}/data/family/" \
   || OVERALL_EXIT=$?
 
+  run_rsync "${DEST_BASE}/data/wn18rr/" \
+  "${SCRIPT_DIR}/data/wn18rr/" \
+  || OVERALL_EXIT=$?
+
 # 3. config files → remote config/
 run_rsync "${DEST_BASE}/config/" \
   "${SCRIPT_DIR}/config/family_config.json" \
+  "${SCRIPT_DIR}/config/wn18rr_config.json" \
+  "${SCRIPT_DIR}/config/wn18rr_hpc.json" \
   "${SCRIPT_DIR}/config/family_comparison_hpc.json" \
   || OVERALL_EXIT=$?
 
@@ -138,6 +144,7 @@ run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/adaptive_beta_only.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only.slurm" \
   "${SCRIPT_DIR}/rule_comparison_gpu.slurm" \
+  "${SCRIPT_DIR}/rule_original_wn18rr.slurm" \
   "${SCRIPT_DIR}/setup_env_hpc.sh" \
   || OVERALL_EXIT=$?
 

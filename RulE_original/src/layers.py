@@ -59,18 +59,30 @@ class FuncToNodeSum(nn.Module):
         #     param.requires_grad = False
         
     
-    def forward(self, A_fn, x_f, mlp_rule_feature):
-        
-        weight = torch.transpose(A_fn, 0, 1).unsqueeze(-1)
-        message = x_f.unsqueeze(0)
+    def forward(self, A_fn, x_f, mlp_rule_feature, chunk_size=512):
+        # A_fn: [num_rules, num_candidates]
+        # x_f:  [num_rules, rule_dim]
+        # mlp_rule_feature: [num_rules, mlp_rule_dim]
+        #
+        # The naive broadcast (message * weight) is [num_candidates, num_rules, rule_dim]
+        # which OOMs on large graphs (e.g. WN18RR with 40k entities).
+        # We chunk over candidates to keep peak memory at chunk_size * num_rules * rule_dim.
 
-        feature = torch.transpose((message * weight), 1, 2)
-        weighted_features = torch.matmul(feature, mlp_rule_feature)
-        weighted_features_norm = self.layer_norm(weighted_features)
-        weighted_features_relu = torch.relu(weighted_features_norm)
-        output = weighted_features_relu.mean(1)
-        
-        return output
+        weight = torch.transpose(A_fn, 0, 1).unsqueeze(-1)  # [C, R, 1]
+        message = x_f.unsqueeze(0)                          # [1, R, D]
+
+        num_candidates = weight.size(0)
+        outputs = []
+        for start in range(0, num_candidates, chunk_size):
+            w_chunk = weight[start: start + chunk_size]              # [c, R, 1]
+            feat = torch.transpose((message * w_chunk), 1, 2)        # [c, D, R]
+            wf = torch.matmul(feat, mlp_rule_feature)                # [c, D, mlp_dim]
+            wf = self.layer_norm(wf)
+            wf = torch.relu(wf)
+            outputs.append(wf.mean(1))                               # [c, mlp_dim]
+
+        return torch.cat(outputs, dim=0)                             # [C, mlp_dim]
+
 
 
     # def forward(self, A_fn, x_f):

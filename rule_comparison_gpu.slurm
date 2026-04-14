@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=rule_comparison
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=7-00:00:00 
+#SBATCH --time=24:00:00 
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G

@@ -164,6 +164,7 @@ class GroundingGAT(nn.Module):
         proj = F.leaky_relu(proj, negative_slope=self.negative_slope)
         edge_score = self.attn_vec(proj).squeeze(-1)            # [num_edges]
         edge_attn = scatter_softmax(edge_score, node_out, dim=0, dim_size=num_nodes)
+        self.last_attn = edge_attn.detach()
         return edge_attn
 
     def compute_confidence(self, rule_emb):

@@ -84,15 +84,30 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+
+    
+    parser.add_argument('--skip_pretrain', action='store_true', default=False,
+                        help='Skip pre-training and load from an existing checkpoint')
+    parser.add_argument('--pretrain_checkpoint', type=str, default=None,
+                        help='Path to pre-trained checkpoint (used with --skip_pretrain)')
     return parser.parse_args(args)
 
 def main():
     args = parse_args()
 
+    skip_pretrain = args.skip_pretrain
+    pretrain_checkpoint = args.pretrain_checkpoint
+    cli_save_path = args.save_path
+
     # read the given config
     if args.init_checkpoint_config:
         args = load_config(args.init_checkpoint_config)
         args = args[0]
+
+    args.skip_pretrain = skip_pretrain
+    args.pretrain_checkpoint = pretrain_checkpoint
+    if cli_save_path is not None:
+        args.save_path = cli_save_path
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -131,19 +146,19 @@ def main():
 
     
     # For pre-training 
-
-    pre_trainer = PreTrainer(
-        graph=graph,
-        model=RulE_model,
-        valid_set=valid_set,
-        test_set=test_set,
-        # tripletset=kge_train_set,
-        ruleset=ruleset,
-        expectation=True,
-        device = device,
-        num_worker=args.cpu_num
-        
-    )
+    if not args.skip_pretrain:
+        pre_trainer = PreTrainer(
+            graph=graph,
+            model=RulE_model,
+            valid_set=valid_set,
+            test_set=test_set,
+            # tripletset=kge_train_set,
+            ruleset=ruleset,
+            expectation=True,
+            device = device,
+            num_worker=args.cpu_num
+            
+        )
     
     # checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
     # RulE_model.load_state_dict(checkpoint['model'])
@@ -152,12 +167,17 @@ def main():
     # valid_mrr = pre_trainer.evaluate('valid', expectation=True)
     # test_mrr = pre_trainer.evaluate('test', expectation=True)
     
-    pre_trainer.train(args)
-    
-    
-    logging.info('Finishing pre-training!')
+        pre_trainer.train(args)
+        
+        
+        logging.info('Finishing pre-training!')
 
     print("loading RulE trainer......")
+
+    if args.pretrain_checkpoint:
+        checkpoint_path = args.pretrain_checkpoint
+    else:
+        checkpoint_path = os.path.join(args.save_path, 'checkpoint')
 
     # load rule embedding and KGE embedding
 
@@ -165,10 +185,12 @@ def main():
     RulE_model.load_state_dict(checkpoint['model'])
     
     
-    logging.info('Test the results of pre-training')
+    logging.info('Loaded pre-trained checkpoint from %s' % checkpoint_path)
+
+    # logging.info('Test the results of pre-training')
     
-    valid_mrr = pre_trainer.evaluate('valid', expectation=True)
-    test_mrr = pre_trainer.evaluate('test', expectation=True)
+    # valid_mrr = pre_trainer.evaluate('valid', expectation=True)
+    # test_mrr = pre_trainer.evaluate('test', expectation=True)
 
     # RulE_model.add_param()
 
