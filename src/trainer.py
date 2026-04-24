@@ -467,11 +467,9 @@ class GroundTrainer(object):
         total_loss = 0.0
         total_size = 0.0
 
+        optimizer.zero_grad(set_to_none=True)
+
         for batch_id, batch in enumerate(islice(train_dataloader, batch_per_epoch)):
-            # self.model.beta.requires_grad = False
-            # self.model.beta.data = self.model.beta / self.model.beta.sum(dim=-1,keepdim=True)
-            # self.model.beta.requires_grad = True
-            
             all_h, all_r, all_t, target, edges_to_remove = batch
             all_h = all_h.squeeze(0)
             all_r = all_r.squeeze(0)
@@ -497,7 +495,7 @@ class GroundTrainer(object):
                         attn = module.last_attn
                         logging.info(f"attn std={attn.std():.4f}, min={attn.min():.4f}, max={attn.max():.4f}")
             if mask.sum().item() != 0:
-                rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
+                rule_logits =  torch.nn.functional.log_softmax(grounding_rule_score, dim=1)
 
                 loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
                 loss.backward()
@@ -509,6 +507,7 @@ class GroundTrainer(object):
                         else:
                             logging.info(f"{name}: grad_norm={param.grad.norm().item():.6f}")
 
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 torch.cuda.empty_cache()

@@ -6,6 +6,17 @@ from layers import MLP, FuncToNodeSum
 
 from torch.nn.utils.rnn import pad_sequence
 
+_MEM_LOG = True    # set to False to disable GPU memory logging
+
+def _mem(tag):
+    if not _MEM_LOG or not torch.cuda.is_available():
+        return
+    torch.cuda.synchronize()
+    alloc  = torch.cuda.memory_allocated()  / 1024**3
+    peak   = torch.cuda.max_memory_allocated() / 1024**3
+    reserv = torch.cuda.memory_reserved()   / 1024**3
+    logging.info(f"[MEM] {tag:55s} alloc={alloc:.3f}GB  peak={peak:.3f}GB  reserved={reserv:.3f}GB")
+
 class RulE(torch.nn.Module):
     def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
         super(RulE, self).__init__()
@@ -344,8 +355,9 @@ class RulE(torch.nn.Module):
 
         rule_index = list()
         rule_count = list()
-        
-        
+
+        _mem(f"forward START  B={all_h.size(0)} r={query_r}")
+
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
         for index, (r_head, r_body) in self.relation2rules[query_r]:
 
@@ -358,53 +370,38 @@ class RulE(torch.nn.Module):
             rule_index.append(index)
             rule_count.append(count)
 
+        _mem(f"after grounding loop  num_rules={len(rule_index)}")
 
         if mask.sum().item() == 0:
-            # return mask + self.bias.unsqueeze(0), (1 - mask).bool(), torch.zeros_like(rule_loss)
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
 
-
         candidate_set = torch.nonzero(mask.view(-1), as_tuple=True)[0]
+        _mem(f"after candidate_set  C={candidate_set.size(0)}")
 
         rule_index = torch.tensor(rule_index, dtype=torch.long, device=device)
         rule_count = torch.stack(rule_count, dim=0)
+        _mem(f"after stack rule_count  shape={list(rule_count.shape)}")
 
         rule_count = rule_count.reshape(rule_index.size(0), -1)[:, candidate_set]
-        
-        rule_emb = self.rules_weight_emb[rule_index]
+        _mem(f"after candidate filter  shape={list(rule_count.shape)}")
 
-        # mlp_feature = self.mlp_feature[rule_index] * rule_emb.unsqueeze(-1)
+        rule_emb = self.rules_weight_emb[rule_index]
         mlp_feature = self.mlp_feature[rule_index]
 
-        # output = self.rule_to_entity(rule_count, mlp_feature)
         output = self.rule_to_entity(rule_count, rule_emb, mlp_feature)
+        _mem(f"after rule_to_entity  out={list(output.shape)}")
 
-
-        # rel = self.relation_embedding(all_r[0]%self.num_relations)
-        # relations_flag = torch.pow(-1,all_r[0] // (self.num_relations)).unsqueeze(-1)
-        # rel = (rel * relations_flag).unsqueeze(0).expand(output.size(0), -1)
-
-        # feature = torch.cat([output, rel], dim=-1)
         feature = output
-
         output = self.score_model(feature).squeeze(-1)
+        _mem(f"after score_model")
 
         score = torch.zeros(all_h.size(0) * self.graph.entity_size, device=device)
         score.scatter_(0, candidate_set, output)
         score = score.view(all_h.size(0), self.graph.entity_size)
         score = score + self.bias.unsqueeze(0)
-        # kge_score = self.compute_g_KGE(all_h, all_r)
-        # kge_score_map = self.map(score, kge_score)
-        
-        # beta = torch.sigmoid(self.beta[all_r[0]])
-        # score = score + self.bias.unsqueeze(0)
-        # betax = self.beta[all_r[0]][0]
-        # betay = self.beta[all_r[0]][1]
-        # beta = self.beta[all_r[0]]
-        # score = beta * score + (1 - beta) * kge_score_map
-        # score = self.beta[all_r[0]] * score +  kge_score
 
         mask = torch.ones_like(mask).bool()
+        _mem(f"forward END")
 
         return score, mask
 

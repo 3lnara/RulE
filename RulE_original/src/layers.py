@@ -2,6 +2,20 @@
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import logging
+
+def _mem(tag):
+    try:
+        import model as _m
+        if not getattr(_m, '_MEM_LOG', False) or not torch.cuda.is_available():
+            return
+        torch.cuda.synchronize()
+        alloc  = torch.cuda.memory_allocated()  / 1024**3
+        peak   = torch.cuda.max_memory_allocated() / 1024**3
+        reserv = torch.cuda.memory_reserved()   / 1024**3
+        logging.info(f"[MEM] {tag:55s} alloc={alloc:.3f}GB  peak={peak:.3f}GB  reserved={reserv:.3f}GB")
+    except Exception:
+        pass
 
 
 class MLP(nn.Module):
@@ -64,25 +78,46 @@ class FuncToNodeSum(nn.Module):
         # x_f:  [num_rules, rule_dim]
         # mlp_rule_feature: [num_rules, mlp_rule_dim]
         #
-        # The naive broadcast (message * weight) is [num_candidates, num_rules, rule_dim]
-        # which OOMs on large graphs (e.g. WN18RR with 40k entities).
-        # We chunk over candidates to keep peak memory at chunk_size * num_rules * rule_dim.
+        # Forward memory: chunk_size * R * D per chunk (e.g. 512 * 400 * 500 = 400MB).
+        # Backward memory WITHOUT checkpointing: all N chunks' feat=[c,D,R] kept simultaneously
+        #   = ceil(C/chunk_size) * chunk_size * R * D, which OOMs for large C (e.g. B=32).
+        # With use_checkpoint=True: only 1 chunk's feat lives at a time during backward
+        #   by recomputing the forward for each chunk on the backward pass.
 
         weight = torch.transpose(A_fn, 0, 1).unsqueeze(-1)  # [C, R, 1]
         message = x_f.unsqueeze(0)                          # [1, R, D]
 
+        R, C = A_fn.shape
+        D = x_f.shape[1]
+        M = mlp_rule_feature.shape[1]
+        _mem(f"  FuncToNodeSum: weight[C,R,1]=[{C},{R},1]  message[1,R,D]=[1,{R},{D}]  mlp[R,M]=[{R},{M}]")
+
+        use_checkpoint = self.training and torch.is_grad_enabled()
+
+        def _chunk_fn(w_chunk, message, mlp_rule_feature):
+            feat = torch.transpose((message * w_chunk), 1, 2)   # [c, D, R]
+            wf   = torch.matmul(feat, mlp_rule_feature)         # [c, D, M]
+            wf   = self.layer_norm(wf)
+            wf   = torch.relu(wf)
+            return wf.mean(1)                                    # [c, M]
+
         num_candidates = weight.size(0)
         outputs = []
         for start in range(0, num_candidates, chunk_size):
-            w_chunk = weight[start: start + chunk_size]              # [c, R, 1]
-            feat = torch.transpose((message * w_chunk), 1, 2)        # [c, D, R]
-            wf = torch.matmul(feat, mlp_rule_feature)                # [c, D, mlp_dim]
-            wf = self.layer_norm(wf)
-            wf = torch.relu(wf)
-            outputs.append(wf.mean(1))                               # [c, mlp_dim]
+            w_chunk = weight[start: start + chunk_size]          # [c, R, 1]
+            if use_checkpoint:
+                out = torch.utils.checkpoint.checkpoint(
+                    _chunk_fn, w_chunk, message, mlp_rule_feature,
+                    use_reentrant=False
+                )
+            else:
+                out = _chunk_fn(w_chunk, message, mlp_rule_feature)
+            outputs.append(out)
+            if start == 0:
+                _mem(f"  FuncToNodeSum: after first chunk [c,R,D]=[{w_chunk.size(0)},{R},{D}]  checkpoint={use_checkpoint}")
 
-        return torch.cat(outputs, dim=0)                             # [C, mlp_dim]
-
+        _mem(f"  FuncToNodeSum: done, output will be [{num_candidates},{M}]")
+        return torch.cat(outputs, dim=0)                         # [C, M]
 
 
     # def forward(self, A_fn, x_f):

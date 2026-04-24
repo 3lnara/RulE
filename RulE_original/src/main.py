@@ -172,6 +172,8 @@ def main():
         
         logging.info('Finishing pre-training!')
 
+        del pre_trainer
+        torch.cuda.empty_cache()
     print("loading RulE trainer......")
 
     if args.pretrain_checkpoint:
@@ -181,8 +183,8 @@ def main():
 
     # load rule embedding and KGE embedding
 
-    checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
-    RulE_model.load_state_dict(checkpoint['model'])
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    RulE_model.load_state_dict(checkpoint['model'], strict=False)
     
     
     logging.info('Loaded pre-trained checkpoint from %s' % checkpoint_path)

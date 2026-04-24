@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=gat_grounding_only
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --gres=gpu:v100:1
 #SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10

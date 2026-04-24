@@ -1,6 +1,6 @@
 {
-    "data_path": "../data/family",
-    "rule_file": "../data/family/mined_rules.txt",
+    "data_path": "/vast.mnt/home/20252643/RulE/data/family",
+    "rule_file": "/vast.mnt/home/20252643/RulE/data/family/mined_rules.txt",
     "cuda": true,
     "cpu_num": 10,
     "seed": 800,
@@ -22,7 +22,7 @@
     "weight_rule": 1,
     "max_steps": 50000,
     "init_checkpoint": null,
-    "save_path": "../outputs/family_comparison_hpc",
+    "save_path": "/vast.mnt/home/20252643/RulE/outputs/family_comparison_hpc",
     "mlp_rule_dim": 100,
     "p_norm": 2,
     "regularization": 0.1,

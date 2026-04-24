@@ -114,6 +114,10 @@ run_rsync "${DEST_BASE}/scripts/" \
   "${SCRIPT_DIR}/scripts/parse_gat_metrics.py" \
   "${SCRIPT_DIR}/scripts/train_beta_grounding.py" \
   "${SCRIPT_DIR}/scripts/test_learnable_beta.py" \
+  "${SCRIPT_DIR}/scripts/evaluate_unified.py" \
+  "${SCRIPT_DIR}/scripts/summarize_unified_results.py" \
+  "${SCRIPT_DIR}/scripts/submit_all.sh" \
+  "${SCRIPT_DIR}/scripts/reorganize_hpc_layout.sh" \
   || OVERALL_EXIT=$?
 
 # 1b. RulE_original/src/ → remote RulE_original/src/
@@ -139,7 +143,12 @@ run_rsync "${DEST_BASE}/config/" \
   "${SCRIPT_DIR}/config/family_comparison_hpc.json" \
   || OVERALL_EXIT=$?
 
-# 4. SLURM job script + setup script → remote ~/
+# 4. SLURM job scripts + setup script
+ensure_remote_dir "${REMOTE_DIR}/slurm" || OVERALL_EXIT=$?
+run_rsync "${DEST_BASE}/slurm/" \
+  "${SCRIPT_DIR}/slurm/" \
+  || OVERALL_EXIT=$?
+
 run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/adaptive_beta_only.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only.slurm" \

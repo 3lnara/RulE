@@ -21,7 +21,8 @@ echo "Creating directory structure at ${HPC_USER}@${HPC_HOST}:${REMOTE_DIR} ..."
 
 ssh "${HPC_USER}@${HPC_HOST}" bash <<EOF
 set -e
-mkdir -p ${REMOTE_DIR}/{src,data,config,outputs,scripts}
+mkdir -p ${REMOTE_DIR}/{src,data,config,outputs,scripts,slurm}
+mkdir -p ${REMOTE_DIR}/outputs/experiments
 echo "Directories created:"
 ls -la ${REMOTE_DIR}/
 EOF

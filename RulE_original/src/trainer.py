@@ -470,13 +470,15 @@ class GroundTrainer(object):
         total_loss = 0.0
         total_size = 0.0
 
-        for batch_id, batch in enumerate(islice(train_dataloader, batch_per_epoch)):
-            # 归一化
+        MEM_LOG_BATCHES = 3   # log memory for first N batches only
 
-            # self.model.beta.requires_grad = False
-            # self.model.beta.data = self.model.beta / self.model.beta.sum(dim=-1,keepdim=True)
-            # self.model.beta.requires_grad = True
-            
+        for batch_id, batch in enumerate(islice(train_dataloader, batch_per_epoch)):
+            import model as _model_mod
+            _model_mod._MEM_LOG = (batch_id < MEM_LOG_BATCHES)
+            if batch_id < MEM_LOG_BATCHES and torch.cuda.is_available():
+                torch.cuda.reset_peak_memory_stats()
+                logging.info(f"[MEM] ===== batch {batch_id} peak reset =====")
+
             all_h, all_r, all_t, target, edges_to_remove = batch
             all_h = all_h.squeeze(0)
             all_r = all_r.squeeze(0)
