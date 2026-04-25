@@ -116,6 +116,7 @@ class PreTrainer(object):
                 
             if step % args.valid_steps == 0:
                 logging.info('Evaluating on Valid Dataset...')
+                torch.cuda.empty_cache()
                 mrr = self.evaluate("valid", self.expectation )
                 if mrr > best_mrr:
                     save_model(self.model,optimizer, args)
@@ -252,8 +253,14 @@ class PreTrainer(object):
                 all_t = all_t.cuda(device=self.device)
                 flag = flag.cuda(device=self.device)
 
-            KGE_score = model.compute_g_KGE(all_h,all_r)
-            
+            # Process one query at a time to avoid OOM.
+            # compute_g_KGE with B queries allocates [B, 40943, 1000] = B * 164MB.
+            # With B=g_batch_size=32 that is 5.24GB; B=1 keeps it at 164MB.
+            kge_rows = []
+            for i in range(all_h.size(0)):
+                kge_rows.append(model.compute_g_KGE(all_h[i:i+1], all_r[i:i+1]))
+            KGE_score = torch.cat(kge_rows, dim=0)
+
             logits = KGE_score
 
             concat_logits.append(logits)

@@ -53,8 +53,8 @@ TRAIN_START=$(date +%s)
 cd "$HOME/RulE/RulE_original/src"
 python3 -u main.py \
     --init_checkpoint_config "${CONFIG}"\
-    --skip_pretrain \
-    --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
+    # --skip_pretrain \
+    # --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
 
 TRAIN_RC=$?
 TRAIN_END=$(date +%s)
