@@ -124,8 +124,27 @@ class GroundingGAT(nn.Module):
 
         self.conf_proj = nn.Linear(relation_dim, 1)
 
-        self._reset_parameters()
+        # Accumulator for the attention-entropy regulariser. Reset to None at the
+        # start of every forward pass; populated inside compute_edge_attention.
+        # Holds Σ a*log(a) summed across all edges of all hops in this batch.
+        # Adding lambda * this to the loss with lambda > 0 rewards uniform
+        # attention (Σ a*log a is most negative when uniform, ~0 when peaked),
+        # countering the GAT attention-collapse pathology.
+        self.attn_entropy_penalty = None
 
+        self._reset_parameters()
+    def set_frozen_confidences(self, confidence_tensor):
+        """
+        Store precomputed RulE confidences as a non-trainable buffer.
+        Should be called once after eval_compute_rule_weight runs in stage two.
+        
+        Args:
+            confidence_tensor: [num_rules] scalar confidence per rule.
+                            Should be sigmoid(add_ruleE scores) computed from
+                            the pre-trained embeddings (see GroundTrainer.train).
+        """
+        self.register_buffer('frozen_confidences', confidence_tensor.clone().detach())
+        self.register_buffer('use_frozen_confidence', torch.ones(1, dtype=torch.bool))
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.W_src.weight)
         nn.init.xavier_uniform_(self.W_dst.weight)
@@ -165,16 +184,25 @@ class GroundingGAT(nn.Module):
         edge_score = self.attn_vec(proj).squeeze(-1)            # [num_edges]
         edge_attn = scatter_softmax(edge_score, node_out, dim=0, dim_size=num_nodes)
         self.last_attn = edge_attn.detach()
+
+        # Accumulate Σ a*log(a) across all hops in this forward pass. Stays in
+        # the graph so the regulariser flows gradients into W_src/W_dst/W_rel/
+        # attn_vec when the trainer adds lambda * attn_entropy_penalty to the loss.
+        eps = 1e-9
+        penalty = (edge_attn * (edge_attn + eps).log()).sum()
+        if self.attn_entropy_penalty is None:
+            self.attn_entropy_penalty = penalty
+        else:
+            self.attn_entropy_penalty = self.attn_entropy_penalty + penalty
+
         return edge_attn
 
-    def compute_confidence(self, rule_emb):
-        """
-        Map a rule's embedding vector to a scalar confidence in [0, 1].
-
-        Args:
-            rule_emb: [hidden_dim] or [num_rules, hidden_dim]
-
-        Returns:
-            confidence: same leading dims, scalar per rule
-        """
-        return torch.sigmoid(self.conf_proj(rule_emb)).squeeze(-1)
+    def compute_confidence(self, rule_index=None, rule_emb=None):
+        if getattr(self, 'use_frozen_confidence', False):
+            # Look up the precomputed RulE confidence for this rule.
+            # This mirrors the original RulE pattern where rules_weight_emb
+            # is indexed by rule_index inside model.forward.
+            return self.frozen_confidences[rule_index]
+        else:
+            # Original behaviour: learnable linear projection of rule embedding.
+            return torch.sigmoid(self.conf_proj(rule_emb)).squeeze(-1)

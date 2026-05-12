@@ -479,46 +479,64 @@ class KnowledgeGraph(object):
 
         return x.squeeze(-1).transpose(0, 1), hop_attentions
 
-    def propagate_with_attention(self, x, relation, attn_fn, entity_emb, relation_emb, edges_to_remove=None):
-        """
-        Single-hop message passing with GAT edge attention.
-
-        Returns:
-            output:    [num_entities, batch, 1]
-            edge_attn: [num_edges] attention weights
-            node_in:   [num_edges] source node indices
-            node_out:  [num_edges] target node indices
-        """
+    def propagate_with_attention(self, x, relation, attn_fn, entity_emb, relation_emb,
+                              edges_to_remove=None, chunk_size=64):
         device = x.device
-        node_in = self.relation2adjacency[relation][0][1]
+        node_in  = self.relation2adjacency[relation][0][1]
         node_out = self.relation2adjacency[relation][0][0]
         if device.type == "cuda":
-            node_in = node_in.cuda(device)
+            node_in  = node_in.cuda(device)
             node_out = node_out.cuda(device)
 
         num_relations = relation_emb.size(0) - 1
-        r_idx = relation % num_relations
+        r_idx  = relation % num_relations
         r_flag = (-1) ** (relation // num_relations)
         rel_emb = relation_emb[r_idx] * r_flag
 
+        # ── Compute edge attention once (no batch dependence). ────────────────
+        # This call also accumulates attn_entropy_penalty — happens exactly once
+        # per hop regardless of chunk_size, so no double-counting.
         edge_attn = attn_fn(entity_emb.detach(), node_in, node_out, rel_emb, x.size(0))
+        # edge_attn: [num_edges]
 
-        message = x[node_in]
-        E, B, D = message.size()
+        B         = x.size(1)
+        num_nodes = x.size(0)
+        use_ckpt  = torch.is_grad_enabled()
 
-        if edges_to_remove is not None:
-            message = message.clone()
-            message_flat = message.view(-1, D)
-            bias = torch.arange(B, device=device)
-            remove_idx = edges_to_remove * B + bias
-            message_flat[remove_idx] = 0
-            message = message_flat.view(E, B, D)
+        # ── _chunk_fn: message-pass one batch slice. ──────────────────────────
+        # All three arguments are tensors so torch.utils.checkpoint is happy.
+        # node_in / node_out / num_nodes are constants captured from the outer scope.
+        def _chunk_fn(ea, xc, etr_c):
+            # ea:    [num_edges]         shared attention weights
+            # xc:    [num_nodes, c, 1]   batch slice of entity signals
+            # etr_c: [c] or empty        edge-to-remove per query in this slice
+            msg = xc[node_in]            # [E, c, 1]
+            E, c, D = msg.size()
+            if etr_c.numel() > 0:
+                msg      = msg.clone()
+                msg_flat = msg.view(-1, D)
+                bias     = torch.arange(c, device=msg.device)
+                msg_flat[etr_c * c + bias] = 0
+                msg = msg_flat.view(E, c, D)
+            weighted = ea.unsqueeze(-1).unsqueeze(-1) * msg   # [E, c, 1]
+            return scatter(weighted, node_out, dim=0, dim_size=num_nodes)  # [num_nodes, c, 1]
 
-        weighted_message = edge_attn.unsqueeze(-1).unsqueeze(-1) * message
-        output = scatter(weighted_message, node_out, dim=0, dim_size=x.size(0))
+        empty_etr = torch.empty(0, dtype=torch.long, device=device)
+        outputs   = []
+        for start in range(0, B, chunk_size):
+            xc    = x[:, start:start + chunk_size, :]
+            etr_c = edges_to_remove[start:start + chunk_size] \
+                    if edges_to_remove is not None else empty_etr
+            if use_ckpt:
+                out = torch.utils.checkpoint.checkpoint(
+                    _chunk_fn, edge_attn, xc, etr_c, use_reentrant=False
+                )
+            else:
+                out = _chunk_fn(edge_attn, xc, etr_c)
+            outputs.append(out)
 
+        output = torch.cat(outputs, dim=1)   # [num_nodes, B, 1]
         return output, edge_attn.detach(), node_in, node_out
-
 
 class TrainDataset(Dataset):
     def __init__(self, graph, batch_size):

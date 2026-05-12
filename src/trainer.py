@@ -392,6 +392,15 @@ class GroundTrainer(object):
         self.model.relation_embedding.weight.requires_grad = False
         self.model.rule_emb.weight.requires_grad = False
 
+        # Diagnostic: optionally freeze the per-rule confidence head. If MRR
+        # stops degrading, conf_proj.bias drift was the cause; otherwise the
+        # GAT itself (W_src/W_dst/W_rel/attn_vec) is.
+        if getattr(args, 'freeze_conf_proj', False):
+            self.model.grounding_gat.conf_proj.weight.requires_grad = False
+            if self.model.grounding_gat.conf_proj.bias is not None:
+                self.model.grounding_gat.conf_proj.bias.requires_grad = False
+            logging.info('[diagnostic] grounding_gat.conf_proj is FROZEN '
+                         '(weight + bias requires_grad=False).')
 
         optimizer = torch.optim.Adam(
             filter(lambda p: p.requires_grad, self.model.parameters()), 
@@ -404,8 +413,22 @@ class GroundTrainer(object):
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
         
         self.model.eval_compute_rule_weight(self.device)
-
-
+        
+        if getattr(args, 'use_rule_confidence_variant_a', False):
+            rule_features = self.model.rule_features.to(self.device)
+            rule_masks = self.model.rule_masks.to(self.device)
+            batch = 128
+            split_num = max(1, rule_features.size(0) // batch)
+            scalars = []
+            with torch.no_grad():
+                for rules, masks in zip(
+                    torch.split(rule_features, split_num, 0),
+                    torch.split(rule_masks, split_num, 0),
+                ):
+                    scores, _ = self.model.add_ruleE(rules.unsqueeze(1), masks)
+                    scalars.append(scores.squeeze(1))
+            scalar_confidences = torch.sigmoid(torch.cat(scalars, dim=0))
+            self.model.grounding_gat.set_frozen_confidences(scalar_confidences)
         
         logging.info('>>>>> RulE: Grounding-Training')
         
@@ -433,7 +456,7 @@ class GroundTrainer(object):
             #     )
             #     warm_up_steps = warm_up_steps * 3
 
-            self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args)
+            self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args, iter_idx=k)
             valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
             # test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
@@ -457,15 +480,24 @@ class GroundTrainer(object):
         test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
        
 
-    def train_step(self, optimizer, train_dataloader, batch_per_epoch, smoothing, print_every, args):
-        
+    def train_step(self, optimizer, train_dataloader, batch_per_epoch, smoothing, print_every, args, iter_idx=0):
+
         batch_per_epoch = batch_per_epoch or len(train_dataloader)
         model = self.model
-        
+
         model.train()
 
         total_loss = 0.0
         total_size = 0.0
+
+        # Diagnostic flags (read once at top so the inner loop is cheap).
+        attn_entropy_weight = float(getattr(args, 'attn_entropy_weight', 0.0))
+        eval_every = int(getattr(args, 'eval_every_batches', 0))
+        do_per_batch_eval = (iter_idx == 0 and eval_every > 0)
+        if do_per_batch_eval:
+            logging.info(f'[diagnostic] iter 1: validating every {eval_every} batches')
+        if attn_entropy_weight > 0.0:
+            logging.info(f'[diagnostic] attention-entropy regularisation \u03bb={attn_entropy_weight}')
 
         optimizer.zero_grad(set_to_none=True)
 
@@ -497,7 +529,17 @@ class GroundTrainer(object):
             if mask.sum().item() != 0:
                 rule_logits =  torch.nn.functional.log_softmax(grounding_rule_score, dim=1)
 
-                loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
+                ce_loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
+
+                # Optional: encourage uniform attention to counter collapse.
+                # Σ a*log(a) is most negative when uniform, ~0 when peaked, so
+                # adding a positive multiple of it to the loss rewards spread.
+                entropy_term = self.model.grounding_gat.attn_entropy_penalty
+                if attn_entropy_weight > 0.0 and entropy_term is not None:
+                    loss = ce_loss + attn_entropy_weight * entropy_term
+                else:
+                    loss = ce_loss
+
                 loss.backward()
 
                 if batch_id == 0:
@@ -506,6 +548,9 @@ class GroundTrainer(object):
                             logging.info(f"NO GRAD: {name}")
                         else:
                             logging.info(f"{name}: grad_norm={param.grad.norm().item():.6f}")
+                    if attn_entropy_weight > 0.0 and entropy_term is not None:
+                        logging.info(f"attn_entropy_penalty (\u03a3 a*log a) = {entropy_term.item():.4f} "
+                                     f"(more negative \u21d2 more uniform)")
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
@@ -523,6 +568,15 @@ class GroundTrainer(object):
                 total_loss = 0.0
                 total_size = 0.0
                 self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+
+            # Per-batch validation in iteration 1 only. Tracks whether MRR is
+            # already at its peak after batch 0 (i.e. all subsequent training
+            # is noise) or whether the GAT/conf_proj actually improves it.
+            if do_per_batch_eval and (batch_id + 1) % eval_every == 0:
+                logging.info(f'[per-batch-eval] iter=1 batch={batch_id + 1} \u2014 evaluating on valid')
+                mrr = self.evaluate('valid', args.alpha, expectation=True)
+                logging.info(f'[per-batch-eval] iter=1 batch={batch_id + 1} valid_mrr={mrr:.6f}')
+                model.train()
         
 
     @torch.no_grad()

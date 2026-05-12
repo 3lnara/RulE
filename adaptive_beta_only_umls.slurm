@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=adaptive_beta_only_fixedbeta
+#SBATCH --job-name=adaptive_beta_only_umls
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=02:00:00
+#SBATCH --constraint=v100
+#SBATCH --time=24:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -10,6 +11,7 @@
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=e.yerbolatova@student.tue.nl
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ── GPU info ───────────────────────────────────────────────────────────────────
 echo "=== GPU info ==="
@@ -41,27 +43,28 @@ echo ""
 #   checkpoint    — best pre-trained KGE + rule embeddings (from PreTrainer)
 #   grounding.pt  — best MLP grounding weights (from GroundTrainer)
 # Both are produced by rule_comparison_gpu.slurm (or a standalone original run).
-ORIG_OUTPUT="$HOME/RulE/outputs/family_comparison_hpc"
+ORIG_OUTPUT="$HOME/RulE/outputs/umls"
 PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
 GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 
 # Config file — same one used for the original run
-CONFIG="$HOME/RulE/config/family_comparison_hpc.json"
+CONFIG="$HOME/RulE/config/umls_hpc.json"
 
 # Output directory for this adaptive-beta run
-SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_fixedbeta"
+SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_umls"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
 # Adaptive-beta hyper-parameters
-BETA_EPOCHS=10
+BETA_EPOCHS=20
 BETA_LR=0.01
-FIXED_ALPHA=3.0   # baseline alpha for comparison table
+BETA_DENSITY_LR=0.001
+FIXED_ALPHA=2.0   # baseline alpha for comparison table
 
 echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
 echo "Config                 : ${CONFIG}"
 echo "Save path              : ${SAVE_PATH}"
-echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR}"
+echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR} / ${BETA_DENSITY_LR}"
 echo "Started                : $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
@@ -99,6 +102,7 @@ python3 -u "$HOME/RulE/scripts/train_beta_grounding.py" \
     --checkpoint "${GROUNDING_CHECKPOINT}" \
     --epochs  "${BETA_EPOCHS}" \
     --lr      "${BETA_LR}" \
+    --density_lr "${BETA_DENSITY_LR}" \
     --alpha   "${FIXED_ALPHA}" \
     2>&1 | tee "${SAVE_PATH}/beta_training.log"
 

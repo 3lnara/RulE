@@ -113,6 +113,7 @@ run_rsync "${DEST_BASE}/scripts/" \
   "${SCRIPT_DIR}/scripts/compare_balancing.py" \
   "${SCRIPT_DIR}/scripts/parse_gat_metrics.py" \
   "${SCRIPT_DIR}/scripts/train_beta_grounding.py" \
+  "${SCRIPT_DIR}/scripts/train_beta_grounding_chunked.py" \
   "${SCRIPT_DIR}/scripts/test_learnable_beta.py" \
   "${SCRIPT_DIR}/scripts/evaluate_unified.py" \
   "${SCRIPT_DIR}/scripts/summarize_unified_results.py" \
@@ -135,10 +136,15 @@ run_rsync "${DEST_BASE}/data/family/" \
   "${SCRIPT_DIR}/data/wn18rr/" \
   || OVERALL_EXIT=$?
 
+run_rsync "${DEST_BASE}/data/umls/" \
+  "${SCRIPT_DIR}/data/umls/" \
+  || OVERALL_EXIT=$?
+
 # 3. config files → remote config/
 run_rsync "${DEST_BASE}/config/" \
   "${SCRIPT_DIR}/config/family_config.json" \
   "${SCRIPT_DIR}/config/wn18rr_config.json" \
+  "${SCRIPT_DIR}/config/umls_hpc.json" \
   "${SCRIPT_DIR}/config/wn18rr_hpc.json" \
   "${SCRIPT_DIR}/config/family_comparison_hpc.json" \
   || OVERALL_EXIT=$?
@@ -151,9 +157,14 @@ run_rsync "${DEST_BASE}/slurm/" \
 
 run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/adaptive_beta_only.slurm" \
+  "${SCRIPT_DIR}/adaptive_beta_only_wn18rr.slurm" \
+  "${SCRIPT_DIR}/adaptive_beta_only_umls.slurm" \
+  "${SCRIPT_DIR}/gat_grounding_only_umls.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only.slurm" \
   "${SCRIPT_DIR}/rule_comparison_gpu.slurm" \
   "${SCRIPT_DIR}/rule_original_wn18rr.slurm" \
+  "${SCRIPT_DIR}/rule_original_umls.slurm" \
+  "${SCRIPT_DIR}/confidence_grounding_only.slurm" \
   "${SCRIPT_DIR}/setup_env_hpc.sh" \
   || OVERALL_EXIT=$?
 

@@ -348,6 +348,9 @@ class RulE(torch.nn.Module):
         if device.type == "cuda":
             self.rule_features = self.rule_features.cuda(device)
 
+        # Reset the entropy accumulator so it covers only this batch's hops.
+        self.grounding_gat.attn_entropy_penalty = None
+
         entity_emb = self.entity_embedding.weight
         relation_emb = self.relation_embedding.weight
 
@@ -367,7 +370,8 @@ class RulE(torch.nn.Module):
             )
 
             rule_emb_vec = self.rules_weight_emb[index]
-            confidence = self.grounding_gat.compute_confidence(rule_emb_vec)
+            # confidence = self.grounding_gat.compute_confidence(rule_emb_vec)
+            confidence = self.grounding_gat.compute_confidence(rule_index=index, rule_emb=rule_emb_vec)
 
             rule_score = attn_count * confidence
             score = score + rule_score

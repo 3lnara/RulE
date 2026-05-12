@@ -89,6 +89,25 @@ def parse_args(args=None):
                         help='Skip pre-training and load from an existing checkpoint')
     parser.add_argument('--pretrain_checkpoint', type=str, default=None,
                         help='Path to pre-trained checkpoint (used with --skip_pretrain)')
+
+    # === Diagnostic flags for grounding stability ===
+    parser.add_argument('--use_rule_confidence_variant_a', action='store_true', default=False,
+                    help='Use frozen RulE confidences (mean of rules_weight_emb) instead of '
+                         'learnable conf_proj during grounding.')
+
+    parser.add_argument('--eval_every_batches', default=0, type=int,
+                        help='If >0, run validation every N batches during iteration 1 only. '
+                             'Use to track MRR within the first epoch (set e.g. 200 for family). '
+                             '0 disables (default).')
+    parser.add_argument('--freeze_conf_proj', action='store_true', default=False,
+                        help='Freeze grounding_gat.conf_proj (weight + bias) during grounding. '
+                             'Diagnostic: if MRR stops degrading, the conf_proj.bias drift is the '
+                             'culprit; otherwise the GAT is.')
+    parser.add_argument('--attn_entropy_weight', default=0.0, type=float,
+                        help='Weight \u03bb for attention entropy regularisation. Adds '
+                             '\u03bb * \u03a3 a*log(a) to the loss; with \u03bb>0 this rewards uniform '
+                             'attention (\u03a3 a*log(a) is most negative when uniform, ~0 when peaked). '
+                             '0 disables (default). Try 1e-4 \u2013 1e-3.')
     return parser.parse_args(args)
 
 def main():
@@ -97,6 +116,11 @@ def main():
     skip_pretrain = args.skip_pretrain
     pretrain_checkpoint = args.pretrain_checkpoint
     cli_save_path = args.save_path
+    cli_eval_every_batches = args.eval_every_batches
+    cli_freeze_conf_proj = args.freeze_conf_proj
+    cli_attn_entropy_weight = args.attn_entropy_weight
+    cli_use_rule_confidence_variant_a = args.use_rule_confidence_variant_a
+
 
     # read the given config
     if args.init_checkpoint_config:
@@ -107,7 +131,10 @@ def main():
     args.pretrain_checkpoint = pretrain_checkpoint
     if cli_save_path is not None:
         args.save_path = cli_save_path
-
+    args.eval_every_batches = cli_eval_every_batches
+    args.freeze_conf_proj = cli_freeze_conf_proj
+    args.attn_entropy_weight = cli_attn_entropy_weight
+    args.use_rule_confidence_variant_a = cli_use_rule_confidence_variant_a
     if args.save_path is None:
         args.save_path = os.path.join('../outputs', datetime.now().strftime('%Y%m-%d%H-%M%S'))
     

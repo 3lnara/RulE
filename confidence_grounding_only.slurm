@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=gat_grounding_frozen_conf
+#SBATCH --job-name=conf_grounding
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --constraint=v100
 #SBATCH --time=24:00:00
+#SBATCH --constraint=v100
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -13,14 +13,20 @@
 #SBATCH --mail-user=e.yerbolatova@student.tue.nl
 
 # ── GPU info ───────────────────────────────────────────────────────────────────
-# echo "=== GPU info ==="
-# nvidia-smi
-# echo "================"
+echo "=== GPU info ==="
+nvidia-smi
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<not set>}"
+echo "SLURM_JOB_GPUS=${SLURM_JOB_GPUS:-<not set>}"
+echo "================"
 
 # ── Python environment ─────────────────────────────────────────────────────────
 module purge
 module load Python/3.10.4-GCCcore-11.3.0
 module load CUDA/12.1.1
+
+if [ -n "${SLURM_JOB_GPUS}" ]; then
+    export CUDA_VISIBLE_DEVICES="${SLURM_JOB_GPUS}"
+fi
 
 VENV="$HOME/RulE/rule_env"
 if [ -f "${VENV}/bin/activate" ]; then
@@ -28,7 +34,6 @@ if [ -f "${VENV}/bin/activate" ]; then
     source "${VENV}/bin/activate"
 else
     echo "ERROR: Virtualenv not found at ${VENV}."
-    echo "Run setup_env_hpc.sh on the login node first: bash ~/RulE/setup_env_hpc.sh"
     exit 1
 fi
 
@@ -38,16 +43,8 @@ echo "PyTorch : $(python3 -c 'import torch; print(torch.__version__, "| CUDA:", 
 echo ""
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Path to an existing pre-trained checkpoint from a previous run.
-# Update this path to point to the actual checkpoint produced by the full
-# comparison run (e.g. outputs/family_comparison_hpc/checkpoint).
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/family_comparison_hpc/checkpoint"
-
-# Output directory for this GAT grounding run
-SAVE_PATH="$HOME/RulE/outputs/gat_diag_frozen_orig_conf"
-
-# nvidia-smi dmon log (framebuffer memory, sampled every 10 s)
-# GPU_LOG="${SAVE_PATH}/gpu_memory.log"
+SAVE_PATH="$HOME/RulE/outputs/confidence_grounding_g32"
 
 echo "Pre-trained checkpoint : ${PRETRAIN_CHECKPOINT}"
 echo "Save path              : ${SAVE_PATH}"
@@ -56,21 +53,12 @@ echo ""
 
 if [ ! -e "${PRETRAIN_CHECKPOINT}" ]; then
     echo "ERROR: Pre-trained checkpoint not found at ${PRETRAIN_CHECKPOINT}."
-    echo "Run the full comparison job first or update PRETRAIN_CHECKPOINT in this script."
     exit 1
 fi
 
 mkdir -p "${SAVE_PATH}"
 
-# ── Start GPU memory monitor in background ─────────────────────────────────────
-# -s m  : memory metrics only (fb = framebuffer used MiB, bar1 = BAR1 used MiB)
-# -d 10 : sample every 10 seconds
-# nvidia-smi dmon -s m -d 10 > "${GPU_LOG}" &
-# GPU_MON_PID=$!
-# echo "GPU memory monitor PID : ${GPU_MON_PID}  (log: ${GPU_LOG})"
-# echo ""
-
-# ── Run GAT grounding only ─────────────────────────────────────────────────────
+# ── Run confidence + counts grounding (no GAT) ────────────────────────────────
 TRAIN_START=$(date +%s)
 
 cd "$HOME/RulE/src"
@@ -79,9 +67,8 @@ python3 -u main.py \
     --skip_pretrain \
     --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
     --g_batch_size 32 \
-    --use_rule_confidence_variant_a \
-    --save_path "${SAVE_PATH}" 
-    # --freeze_conf_proj
+    --save_path "${SAVE_PATH}"
+    # Note: --use_gat is NOT passed → RulEConfidence (counts × rule_confidence) is used
 
 TRAIN_RC=$?
 TRAIN_END=$(date +%s)
@@ -93,12 +80,10 @@ printf "Training wall time : %dh%02dm%02ds\n" \
     $(( TRAIN_WALL / 3600 )) $(( (TRAIN_WALL % 3600) / 60 )) $(( TRAIN_WALL % 60 ))
 
 if [ "${TRAIN_RC}" -ne 0 ]; then
-    echo "ERROR: training failed — skipping metrics parsing."
-    echo "Job finished: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "ERROR: training failed."
     exit "${TRAIN_RC}"
 fi
 
-# ── Parse and tabulate per-iteration metrics ───────────────────────────────────
 echo ""
 echo "=== Per-iteration metrics ==="
 python3 "$HOME/RulE/scripts/parse_gat_metrics.py" \

@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=gat_grounding_frozen_conf
+#SBATCH --job-name=gat_grounding_umls
 #SBATCH --partition=mcs.gpu.q
 #SBATCH --constraint=v100
-#SBATCH --time=24:00:00
+#SBATCH --time=2:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -40,11 +40,11 @@ echo ""
 # ── Configuration ──────────────────────────────────────────────────────────────
 # Path to an existing pre-trained checkpoint from a previous run.
 # Update this path to point to the actual checkpoint produced by the full
-# comparison run (e.g. outputs/family_comparison_hpc/checkpoint).
-PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/family_comparison_hpc/checkpoint"
+# comparison run (e.g. outputs/umls/checkpoint).
+PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
 
 # Output directory for this GAT grounding run
-SAVE_PATH="$HOME/RulE/outputs/gat_diag_frozen_orig_conf"
+SAVE_PATH="$HOME/RulE/outputs/gat_umls"
 
 # nvidia-smi dmon log (framebuffer memory, sampled every 10 s)
 # GPU_LOG="${SAVE_PATH}/gpu_memory.log"
@@ -75,11 +75,10 @@ TRAIN_START=$(date +%s)
 
 cd "$HOME/RulE/src"
 python3 -u main.py \
-    --init_checkpoint_config "$HOME/RulE/config/family_comparison_hpc.json" \
+    --init_checkpoint_config "$HOME/RulE/config/umls_hpc.json" \
     --skip_pretrain \
     --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
-    --g_batch_size 32 \
-    --use_rule_confidence_variant_a \
+    --eval_every_batches 200\
     --save_path "${SAVE_PATH}" 
     # --freeze_conf_proj
 

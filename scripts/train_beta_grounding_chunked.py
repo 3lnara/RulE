@@ -29,16 +29,15 @@ def parse_args():
 
 
 def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alpha=3.0):
-    """Evaluate the model."""
+    """Evaluate the model.
+
+    Ranks are computed per-batch and moved to CPU immediately so the GPU never
+    holds more than one batch of [batch, num_entities] logits at a time.  This
+    is critical for large datasets such as WN18RR (40 943 entities).
+    """
     model.eval()
-    
-    concat_logits = []
-    concat_all_h = []
-    concat_all_r = []
-    concat_all_t = []
-    concat_flag = []
-    concat_mask = []
-    
+    all_ranks = []
+
     with torch.no_grad():
         for batch in dataloader:
             all_h, all_r, all_t, flag = batch
@@ -46,13 +45,13 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             all_r = all_r.squeeze(0).to(device)
             all_t = all_t.squeeze(0).to(device)
             flag = flag.squeeze(0).to(device)
-            
+
             # Forward pass
             logits, mask = model(all_h, all_r, None)
-            
+
             # Combine with KGE
             kge_score = model.compute_g_KGE(all_h, all_r)
-            
+
             if adaptive_beta:
                 beta, _ = model.compute_adaptive_beta(logits, all_r)
                 logits = beta * logits + (1 - beta) * kge_score
@@ -60,39 +59,29 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
                 beta = torch.sigmoid(model.beta[all_r[0]]).unsqueeze(-1)
                 logits = beta * logits + (1 - beta) * kge_score
             else:
-                # Use fixed alpha
                 logits = logits + alpha * kge_score
-            
-            concat_logits.append(logits)
-            concat_all_h.append(all_h)
-            concat_all_r.append(all_r)
-            concat_all_t.append(all_t)
-            concat_flag.append(flag)
-            concat_mask.append(mask)
-    
-    # Concatenate all batches
-    concat_logits = torch.cat(concat_logits, dim=0)
-    concat_all_h = torch.cat(concat_all_h, dim=0)
-    concat_all_r = torch.cat(concat_all_r, dim=0)
-    concat_all_t = torch.cat(concat_all_t, dim=0)
-    concat_flag = torch.cat(concat_flag, dim=0)
-    concat_mask = torch.cat(concat_mask, dim=0)
-    
-    # Compute ranks
-    ranks = []
-    for k in range(concat_all_t.size(0)):
-        t = concat_all_t[k]
-        if concat_mask[k, t].item() == True:
-            val = concat_logits[k, t]
-            L = (concat_logits[k][concat_flag[k]] > val).sum().item() + 1
-            H = (concat_logits[k][concat_flag[k]] >= val).sum().item() + 2
-        else:
-            L = 1
-            H = concat_flag.size(1) + 1
-        ranks.append((L + H - 1) / 2.0)
-    
-    ranks = torch.tensor(ranks, dtype=torch.float)
-    
+
+            # Move to CPU immediately — avoids accumulating GB of GPU tensors
+            logits_cpu = logits.cpu()
+            flag_cpu = flag.cpu()
+            mask_cpu = mask.cpu()
+            all_t_cpu = all_t.cpu()
+            del logits, kge_score
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+
+            for k in range(all_t_cpu.size(0)):
+                t = all_t_cpu[k]
+                if mask_cpu[k, t].item():
+                    val = logits_cpu[k, t]
+                    L = (logits_cpu[k][flag_cpu[k]] > val).sum().item() + 1
+                    H = (logits_cpu[k][flag_cpu[k]] >= val).sum().item() + 2
+                else:
+                    L = 1
+                    H = flag_cpu.size(1) + 1
+                all_ranks.append((L + H - 1) / 2.0)
+
+    ranks = torch.tensor(all_ranks, dtype=torch.float)
     metrics = {
         'Hit@1': (ranks <= 1).float().mean().item(),
         'Hit@3': (ranks <= 3).float().mean().item(),
@@ -100,75 +89,85 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
         'MR': ranks.mean().item(),
         'MRR': (1.0 / ranks).mean().item()
     }
-    
     return metrics
 
 
 def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
-    """Train beta (and beta_density if adaptive) for one epoch."""
+    """Train beta (and beta_density if adaptive) for one epoch.
+
+    Memory strategy for large datasets (e.g. WN18RR, 40 943 entities):
+    - rule_logits and kge_score are computed once under no_grad and kept on GPU
+      only for the duration of one dataloader batch.
+    - beta is applied per-sample (slice [i:i+1]) so each backward graph covers
+      only one query rather than the whole batch, keeping peak memory low.
+    - optimizer.step() is called per-sample so gradients never accumulate.
+    - Intermediate tensors are explicitly deleted and the cache cleared after
+      each dataloader batch.
+    """
     model.train()
-    
-    # Freeze all parameters except beta-related ones
+
     for name, param in model.named_parameters():
         if 'beta' not in name:
             param.requires_grad = False
         else:
             param.requires_grad = True
-    
-    total_loss = 0
-    num_batches = 0
-    
+    total_loss = 0.0
+    num_updates = 0
+
     for batch in tqdm(dataloader, desc="Training beta"):
         all_h, all_r, all_t, flag = batch
         all_h = all_h.squeeze(0).to(device)
         all_r = all_r.squeeze(0).to(device)
         all_t = all_t.squeeze(0).to(device)
         flag = flag.squeeze(0).to(device)
-        
-        optimizer.zero_grad()
-        
+
+        # Compute frozen activations once for the whole batch
         with torch.no_grad():
             rule_logits, mask = model(all_h, all_r, None)
             kge_score = model.compute_g_KGE(all_h, all_r)
-        
-        if adaptive:
-            beta, _ = model.compute_adaptive_beta(rule_logits, all_r)
-        else:
-            beta = torch.sigmoid(model.beta[all_r[0]]).unsqueeze(-1)
-        logits = beta * rule_logits + (1 - beta) * kge_score
-        
-        # Compute loss: we want to maximize score for true tails
-        # Use margin ranking loss: score(true) should be higher than score(false)
-        true_scores = logits.gather(1, all_t.unsqueeze(1)).squeeze(1)  # [batch]
-        
-        # Compute loss for each example
-        losses = []
+        optimizer.zero_grad()
+        # Per-sample backward to keep graph size O(num_entities) not O(batch*num_entities)
         for i in range(all_h.size(0)):
-            if mask[i, all_t[i]].item():
-                # Get all valid negative samples
-                negative_mask = flag[i] & (torch.arange(logits.size(1), device=device) != all_t[i])
-                if negative_mask.sum() > 0:
-                    negative_scores = logits[i][negative_mask]
-                    # Sample some negatives to keep computation manageable
-                    if negative_scores.size(0) > 100:
-                        idx = torch.randperm(negative_scores.size(0))[:100]
-                        negative_scores = negative_scores[idx]
-                    
-                    # Margin ranking loss: true_score should be > negative_score + margin
-                    true_score = true_scores[i]
-                    margin = 1.0
-                    loss = torch.clamp(margin - true_score + negative_scores, min=0).mean()
-                    losses.append(loss)
-        
-        # Aggregate all losses and backpropagate once
-        if len(losses) > 0:
-            batch_loss = torch.stack(losses).mean()
-            batch_loss.backward()
-            optimizer.step()
-            total_loss += batch_loss.item()
-            num_batches += 1
-    
-    return total_loss / max(num_batches, 1)
+            if not mask[i, all_t[i]].item():
+                continue
+
+            r_i = all_r[i:i+1]
+            rl_i = rule_logits[i:i+1]   # [1, E] — detached from frozen no_grad graph
+            kg_i = kge_score[i:i+1]     # [1, E]
+
+            if adaptive:
+                beta_i, _ = model.compute_adaptive_beta(rl_i, r_i)
+            else:
+                beta_i = torch.sigmoid(model.beta[r_i[0]]).unsqueeze(-1)
+
+            logit_i = beta_i * rl_i + (1 - beta_i) * kg_i   # [1, E], grad through beta only
+
+            negative_mask = flag[i] & (torch.arange(logit_i.size(1), device=device) != all_t[i])
+            if negative_mask.sum() == 0:
+                del logit_i, beta_i
+                continue
+
+            neg_scores = logit_i[0][negative_mask]
+            if neg_scores.size(0) > 100:
+                idx = torch.randperm(neg_scores.size(0), device=device)[:100]
+                neg_scores = neg_scores[idx]
+
+            true_score = logit_i[0, all_t[i]]
+            loss = torch.clamp(1.0 - true_score + neg_scores, min=0).mean()
+
+            loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+        num_updates += 1
+
+        del logit_i, beta_i, neg_scores, true_score, loss
+
+        del rule_logits, kge_score
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+
+    return total_loss / max(num_updates, 1)
 
 
 def print_results(name, metrics):
@@ -257,12 +256,17 @@ def main():
     model = model.to(device)
     model.eval_compute_rule_weight(device)
     
-    # Create dataloaders
-    batch_size = getattr(config, 'g_batch_size', 8)
-    valid_set = ValidDataset(graph, batch_size)
+    # Create dataloaders.
+    # Use batch_size=1 regardless of config's g_batch_size: compute_g_KGE
+    # materializes a [batch, num_entities, hidden_dim*2] tail tensor on the GPU.
+    # For WN18RR (40 943 entities, hidden_dim=500) that is
+    #   g_batch_size=32 → [32, 40 943, 1000] ≈ 5.2 GB  (OOM)
+    #   g_batch_size=1  → [1,  40 943, 1000] ≈ 164 MB  (safe)
+    beta_batch_size = 4
+    valid_set = ValidDataset(graph, beta_batch_size)
     valid_dataloader = DataLoader(valid_set, batch_size=1, num_workers=0)
-    
-    test_set = TestDataset(graph, batch_size)
+
+    test_set = TestDataset(graph, beta_batch_size)
     test_dataloader = DataLoader(test_set, batch_size=1, num_workers=0)
     
     print(f"\n{'='*60}")
@@ -321,7 +325,9 @@ def main():
     
     model.beta.requires_grad = False
     model.beta_density.requires_grad = True
-    optimizer_adaptive = torch.optim.Adam([model.beta_density], lr=args.density_lr)
+    optimizer_adaptive = torch.optim.Adam(
+        [model.beta_density], lr=args.density_lr
+    )
     
     best_mrr_adaptive = 0
     best_beta_adaptive = model.beta.data.clone()
