@@ -93,7 +93,7 @@ echo ""
 # so it must be run with src/ on the Python path.
 TRAIN_START=$(date +%s)
 
-cd "$HOME/RulE/src"
+cd "$HOME/RulE/RulE_original/src"
 python3 -u "$HOME/RulE/scripts/train_beta_grounding.py" \
     --config  "${CONFIG}" \
     --checkpoint "${GROUNDING_CHECKPOINT}" \

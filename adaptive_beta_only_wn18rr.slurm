@@ -2,7 +2,7 @@
 #SBATCH --job-name=adaptive_beta_only_wn18rr
 #SBATCH --partition=mcs.gpu.q
 #SBATCH --constraint=v100
-#SBATCH --time=01:00:00
+#SBATCH --time=04:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -57,7 +57,7 @@ GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 # Adaptive-beta hyper-parameters
 BETA_EPOCHS=10
 BETA_LR=0.01
-BETA_DENSITY_LR=0.001
+BETA_DENSITY_LR=0.01
 FIXED_ALPHA=1.0   # baseline alpha for comparison table
 
 echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"
@@ -96,7 +96,7 @@ echo ""
 # so it must be run with src/ on the Python path.
 TRAIN_START=$(date +%s)
 
-cd "$HOME/RulE/src"
+cd "$HOME/RulE/RulE_original/src"
 python3 -u "$HOME/RulE/scripts/train_beta_grounding_chunked.py" \
     --config  "${CONFIG}" \
     --checkpoint "${GROUNDING_CHECKPOINT}" \

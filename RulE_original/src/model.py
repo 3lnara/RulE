@@ -46,7 +46,17 @@ class RulE(torch.nn.Module):
             self.score_model = MLP(self.mlp_rule_dim, [1]) 
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
-        
+
+        # === Learnable per-relation beta for KGE/Rule balancing ===
+        # beta * rule_score + (1-beta) * kge_score
+        # sigmoid(0) = 0.5 -> equal weighting at init
+        self.beta = nn.Parameter(torch.zeros(self.num_relations * 2))
+        nn.init.constant_(self.beta, 0.0)
+
+        # === Query-adaptive beta: conditions on grounding density ===
+        # beta(h,r) = sigmoid(beta_rel[r] + beta_density * density(h,r))
+        self.beta_density = nn.Parameter(torch.zeros(1))
+
         self.epsilon = 2.0
 
         
@@ -426,3 +436,23 @@ class RulE(torch.nn.Module):
             rules_weight_emb.append(rule_weight_emb)
 
         self.rules_weight_emb = torch.cat(rules_weight_emb)
+
+    def compute_adaptive_beta(self, rule_score, all_r):
+        """
+        Query-adaptive beta combining per-relation bias and grounding density.
+
+        Args:
+            rule_score: [batch, num_entities] rule grounding scores from forward()
+            all_r:      [batch] relation indices
+
+        Returns:
+            beta:    [batch, 1] adaptive beta in (0, 1)
+            density: [batch] grounding density per query (for interpretability)
+        """
+        min_score = rule_score.min(dim=-1, keepdim=True)[0]
+        grounded = ((rule_score - min_score) > 1e-6).float()
+        density = grounded.mean(dim=-1)
+
+        logit = self.beta[all_r] + self.beta_density * density
+        beta = torch.sigmoid(logit).unsqueeze(-1)
+        return beta, density

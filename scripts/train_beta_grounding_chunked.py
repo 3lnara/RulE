@@ -4,11 +4,12 @@ This allows learning optimal KGE/Rule score balance per relation without retrain
 """
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'RulE_original', 'src'))
 import argparse
+import random
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from data import KnowledgeGraph, TestDataset, ValidDataset, RuleDataset
@@ -100,17 +101,25 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
       only for the duration of one dataloader batch.
     - beta is applied per-sample (slice [i:i+1]) so each backward graph covers
       only one query rather than the whole batch, keeping peak memory low.
-    - optimizer.step() is called per-sample so gradients never accumulate.
-    - Intermediate tensors are explicitly deleted and the cache cleared after
-      each dataloader batch.
+    - Each per-sample loss is divided by N_valid before .backward(), so the
+      accumulated grad equals the batch *mean* (not sum). This matches the
+      non-chunked version and keeps the effective lr batch-size-invariant.
+    - optimizer.step() is called once per dataloader batch.
     """
     model.train()
 
+    # Explicit freezing tied to the training stage. Avoids the previous
+    # 'beta in name' substring match, which silently re-enabled grad on
+    # `model.beta` during stage 6 even though only `beta_density` was meant
+    # to train.
     for name, param in model.named_parameters():
-        if 'beta' not in name:
-            param.requires_grad = False
+        if name == 'beta':
+            param.requires_grad = (not adaptive)
+        elif name == 'beta_density':
+            param.requires_grad = adaptive
         else:
-            param.requires_grad = True
+            param.requires_grad = False
+
     total_loss = 0.0
     num_updates = 0
 
@@ -125,12 +134,32 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
         with torch.no_grad():
             rule_logits, mask = model(all_h, all_r, None)
             kge_score = model.compute_g_KGE(all_h, all_r)
-        optimizer.zero_grad()
-        # Per-sample backward to keep graph size O(num_entities) not O(batch*num_entities)
+
+        # Pre-pass: find indices of samples that contribute to the loss.
+        # A sample contributes iff (a) its true tail is unmasked and
+        # (b) there is at least one usable negative. We need N_valid up-front
+        # to scale each per-sample loss by 1/N_valid → mean gradient.
+        valid_indices = []
         for i in range(all_h.size(0)):
             if not mask[i, all_t[i]].item():
                 continue
+            negative_mask_i = flag[i] & (torch.arange(rule_logits.size(1), device=device) != all_t[i])
+            if negative_mask_i.sum().item() == 0:
+                continue
+            valid_indices.append(i)
 
+        if not valid_indices:
+            del rule_logits, kge_score
+            if device.type == "cuda":
+                torch.cuda.empty_cache()
+            continue
+
+        N = len(valid_indices)
+        optimizer.zero_grad()
+
+        batch_loss_sum = 0.0  # sum of per-sample mean losses, divided by N -> batch mean
+        logit_i = beta_i = neg_scores = true_score = loss = None  # for the final del
+        for i in valid_indices:
             r_i = all_r[i:i+1]
             rl_i = rule_logits[i:i+1]   # [1, E] — detached from frozen no_grad graph
             kg_i = kge_score[i:i+1]     # [1, E]
@@ -143,26 +172,27 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
             logit_i = beta_i * rl_i + (1 - beta_i) * kg_i   # [1, E], grad through beta only
 
             negative_mask = flag[i] & (torch.arange(logit_i.size(1), device=device) != all_t[i])
-            if negative_mask.sum() == 0:
-                del logit_i, beta_i
-                continue
-
             neg_scores = logit_i[0][negative_mask]
             if neg_scores.size(0) > 100:
                 idx = torch.randperm(neg_scores.size(0), device=device)[:100]
                 neg_scores = neg_scores[idx]
 
             true_score = logit_i[0, all_t[i]]
-            loss = torch.clamp(1.0 - true_score + neg_scores, min=0).mean()
-
+            # Per-sample mean over negatives, then divide by N so the per-sample
+            # gradients add up to the batch mean (equivalent to stacking and
+            # calling .mean().backward() in the non-chunked version, but with
+            # per-sample memory).
+            loss = torch.clamp(1.0 - true_score + neg_scores, min=0).mean() / N
             loss.backward()
+            batch_loss_sum += loss.item()
+
         optimizer.step()
 
-        total_loss += loss.item()
+        # batch_loss_sum = (1/N) * sum_i loss_i  -> the actual batch mean loss
+        total_loss += batch_loss_sum
         num_updates += 1
 
         del logit_i, beta_i, neg_scores, true_score, loss
-
         del rule_logits, kge_score
         if device.type == "cuda":
             torch.cuda.empty_cache()
@@ -195,6 +225,70 @@ def print_beta_stats(model):
             print(f"    -> Negative: denser groundings push beta DOWN (trust KGE more)")
         else:
             print(f"    -> Zero: grounding density has no effect (pure per-relation beta)")
+
+
+def split_facts_per_relation(facts, train_ratio=0.5, seed=42):
+    """Per-relation stratified split of a (h, r, t) fact list.
+
+    Guarantees every relation that appears in `facts` is present in both halves
+    (except for relations with a single fact, which go to the train half).
+    Returns (train_facts, select_facts).
+    """
+    rng = random.Random(seed)
+    by_rel = {}
+    for fact in facts:
+        by_rel.setdefault(fact[1], []).append(fact)
+    train_facts, select_facts = [], []
+    for _, items in by_rel.items():
+        items = list(items)
+        rng.shuffle(items)
+        n = len(items)
+        if n == 1:
+            train_facts.append(items[0])
+            continue
+        n_train = max(1, int(round(n * train_ratio)))
+        n_train = min(n_train, n - 1)
+        train_facts.extend(items[:n_train])
+        select_facts.extend(items[n_train:])
+    return train_facts, select_facts
+
+
+class FactListValidDataset(Dataset):
+    """Variant of ValidDataset that takes an explicit fact list.
+
+    Used to feed the per-relation train/select halves of valid_facts to the
+    beta-training loop without modifying the original ValidDataset class.
+    Behavior (batching, filter mask via hr2ooo) mirrors ValidDataset/TestDataset.
+    """
+
+    def __init__(self, graph, batch_size, facts):
+        self.graph = graph
+        self.batch_size = batch_size
+        r2instances = [[] for _ in range(self.graph.relation_size * 2)]
+        for h, r, t in facts:
+            r2instances[r].append((h, r, t))
+        self.batches = []
+        for _, instances in enumerate(r2instances):
+            random.shuffle(instances)
+            for k in range(0, len(instances), self.batch_size):
+                start = k
+                end = min(k + self.batch_size, len(instances))
+                self.batches.append(instances[start:end])
+
+    def __len__(self):
+        return len(self.batches)
+
+    def __getitem__(self, idx):
+        data = self.batches[idx]
+        all_h = torch.LongTensor([t[0] for t in data])
+        all_r = torch.LongTensor([t[1] for t in data])
+        all_t = torch.LongTensor([t[2] for t in data])
+        mask = torch.ones(len(data), self.graph.entity_size).bool()
+        for k, (h, r, _t) in enumerate(data):
+            hr_index = self.graph.encode_hr(h, r)
+            t_index = torch.LongTensor(self.graph.hr2ooo[hr_index])
+            mask[k][t_index] = 0
+        return all_h, all_r, all_t, mask
 
 
 def main():
@@ -245,12 +339,12 @@ def main():
     # Load checkpoint
     checkpoint = torch.load(args.checkpoint, map_location=device)
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        state_dict = checkpoint['model_state_dict']
     elif 'model' in checkpoint:
-        model.load_state_dict(checkpoint['model'], strict=False)
+        state_dict = checkpoint['model']
     else:
-        model.load_state_dict(checkpoint, strict=False)
-    result = model.load_state_dict(checkpoint['model'], strict=False)
+        state_dict = checkpoint
+    result = model.load_state_dict(state_dict, strict=False)
     print("Missing keys (in model, not in checkpoint):", result.missing_keys)
     print("Unexpected keys (in checkpoint, not in model):", result.unexpected_keys)
     model = model.to(device)
@@ -262,9 +356,24 @@ def main():
     # For WN18RR (40 943 entities, hidden_dim=500) that is
     #   g_batch_size=32 → [32, 40 943, 1000] ≈ 5.2 GB  (OOM)
     #   g_batch_size=1  → [1,  40 943, 1000] ≈ 164 MB  (safe)
+    #
+    # The valid set is split 50/50 per-relation: one half is used to TRAIN beta
+    # (margin loss), the other half is used to SELECT the best epoch (early
+    # stopping). This removes the bias of training and selecting on the same
+    # data. The test set is untouched.
     beta_batch_size = 4
-    valid_set = ValidDataset(graph, beta_batch_size)
-    valid_dataloader = DataLoader(valid_set, batch_size=1, num_workers=0)
+    train_facts, select_facts = split_facts_per_relation(
+        graph.valid_facts, train_ratio=0.5, seed=42
+    )
+    print(f"Valid split for beta training: "
+          f"{len(train_facts)} train / {len(select_facts)} select "
+          f"(from {len(graph.valid_facts)} total valid facts)")
+
+    valid_train_set = FactListValidDataset(graph, beta_batch_size, train_facts)
+    valid_train_loader = DataLoader(valid_train_set, batch_size=1, num_workers=0)
+
+    valid_select_set = FactListValidDataset(graph, beta_batch_size, select_facts)
+    valid_select_loader = DataLoader(valid_select_set, batch_size=1, num_workers=0)
 
     test_set = TestDataset(graph, beta_batch_size)
     test_dataloader = DataLoader(test_set, batch_size=1, num_workers=0)
@@ -295,19 +404,19 @@ def main():
     best_beta = model.beta.data.clone()
     
     for epoch in range(args.epochs):
-        loss = train_beta_epoch(model, valid_dataloader, optimizer, device, adaptive=False)
+        loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False)
         model.eval()
-        val_metrics = evaluate(model, valid_dataloader, device, use_beta=True)
-        
+        val_metrics = evaluate(model, valid_select_loader, device, use_beta=True)
+
         print(f"\nEpoch {epoch+1}/{args.epochs}:")
         print(f"  Loss: {loss:.4f}")
-        print(f"  Valid MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
-        
+        print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+
         if val_metrics['MRR'] > best_mrr:
             best_mrr = val_metrics['MRR']
             best_beta = model.beta.data.clone()
             print(f"  New best MRR!")
-    
+
     model.beta.data = best_beta
     
     print(f"\n[4] Testing with TRAINED per-relation beta...")
@@ -334,13 +443,13 @@ def main():
     best_density = model.beta_density.data.clone()
     
     for epoch in range(args.epochs):
-        loss = train_beta_epoch(model, valid_dataloader, optimizer_adaptive, device, adaptive=True)
+        loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True)
         model.eval()
-        val_metrics = evaluate(model, valid_dataloader, device, adaptive_beta=True)
-        
+        val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True)
+
         print(f"\nEpoch {epoch+1}/{args.epochs}:")
         print(f"  Loss: {loss:.4f}")
-        print(f"  Valid MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+        print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
         print(f"  beta_density = {model.beta_density.item():.4f}")
         
         if val_metrics['MRR'] > best_mrr_adaptive:

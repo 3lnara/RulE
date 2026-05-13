@@ -4,11 +4,12 @@ This allows learning optimal KGE/Rule score balance per relation without retrain
 """
 import os
 import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'RulE_original', 'src'))
 import argparse
+import random
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
 from data import KnowledgeGraph, TestDataset, ValidDataset, RuleDataset
@@ -107,13 +108,19 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
 def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
     """Train beta (and beta_density if adaptive) for one epoch."""
     model.train()
-    
-    # Freeze all parameters except beta-related ones
+
+    # Explicit freezing tied to the training stage. This avoids the previous
+    # 'beta in name' substring match, which was True for BOTH `beta` and
+    # `beta_density` and so silently re-enabled grad on `model.beta` during
+    # stage 6 (the adaptive stage). The values still didn't drift because the
+    # optimizer only owned `beta_density`, but the grad was wastefully computed.
     for name, param in model.named_parameters():
-        if 'beta' not in name:
-            param.requires_grad = False
+        if name == 'beta':
+            param.requires_grad = (not adaptive)
+        elif name == 'beta_density':
+            param.requires_grad = adaptive
         else:
-            param.requires_grad = True
+            param.requires_grad = False
     
     total_loss = 0
     num_batches = 0
@@ -198,6 +205,70 @@ def print_beta_stats(model):
             print(f"    -> Zero: grounding density has no effect (pure per-relation beta)")
 
 
+def split_facts_per_relation(facts, train_ratio=0.5, seed=42):
+    """Per-relation stratified split of a (h, r, t) fact list.
+
+    Guarantees every relation that appears in `facts` is present in both halves
+    (except for relations with a single fact, which go to the train half).
+    Returns (train_facts, select_facts).
+    """
+    rng = random.Random(seed)
+    by_rel = {}
+    for fact in facts:
+        by_rel.setdefault(fact[1], []).append(fact)
+    train_facts, select_facts = [], []
+    for _, items in by_rel.items():
+        items = list(items)
+        rng.shuffle(items)
+        n = len(items)
+        if n == 1:
+            train_facts.append(items[0])
+            continue
+        n_train = max(1, int(round(n * train_ratio)))
+        n_train = min(n_train, n - 1)
+        train_facts.extend(items[:n_train])
+        select_facts.extend(items[n_train:])
+    return train_facts, select_facts
+
+
+class FactListValidDataset(Dataset):
+    """Variant of ValidDataset that takes an explicit fact list.
+
+    Used to feed the per-relation train/select halves of valid_facts to the
+    beta-training loop without modifying the original ValidDataset class.
+    Behavior (batching, filter mask via hr2ooo) mirrors ValidDataset/TestDataset.
+    """
+
+    def __init__(self, graph, batch_size, facts):
+        self.graph = graph
+        self.batch_size = batch_size
+        r2instances = [[] for _ in range(self.graph.relation_size * 2)]
+        for h, r, t in facts:
+            r2instances[r].append((h, r, t))
+        self.batches = []
+        for _, instances in enumerate(r2instances):
+            random.shuffle(instances)
+            for k in range(0, len(instances), self.batch_size):
+                start = k
+                end = min(k + self.batch_size, len(instances))
+                self.batches.append(instances[start:end])
+
+    def __len__(self):
+        return len(self.batches)
+
+    def __getitem__(self, idx):
+        data = self.batches[idx]
+        all_h = torch.LongTensor([t[0] for t in data])
+        all_r = torch.LongTensor([t[1] for t in data])
+        all_t = torch.LongTensor([t[2] for t in data])
+        mask = torch.ones(len(data), self.graph.entity_size).bool()
+        for k, (h, r, _t) in enumerate(data):
+            hr_index = self.graph.encode_hr(h, r)
+            t_index = torch.LongTensor(self.graph.hr2ooo[hr_index])
+            mask[k][t_index] = 0
+        return all_h, all_r, all_t, mask
+
+
 def main():
     args = parse_args()
     
@@ -246,22 +317,36 @@ def main():
     # Load checkpoint
     checkpoint = torch.load(args.checkpoint, map_location=device)
     if 'model_state_dict' in checkpoint:
-        model.load_state_dict(checkpoint['model_state_dict'], strict=False)
+        state_dict = checkpoint['model_state_dict']
     elif 'model' in checkpoint:
-        model.load_state_dict(checkpoint['model'], strict=False)
+        state_dict = checkpoint['model']
     else:
-        model.load_state_dict(checkpoint, strict=False)
-    result = model.load_state_dict(checkpoint['model'], strict=False)
+        state_dict = checkpoint
+    result = model.load_state_dict(state_dict, strict=False)
     print("Missing keys (in model, not in checkpoint):", result.missing_keys)
     print("Unexpected keys (in checkpoint, not in model):", result.unexpected_keys)
     model = model.to(device)
     model.eval_compute_rule_weight(device)
     
-    # Create dataloaders
+    # Create dataloaders.
+    # The valid set is split 50/50 per-relation: one half is used to TRAIN
+    # beta (margin loss), the other half is used to SELECT the best epoch
+    # (early stopping). This removes the bias of training and selecting on
+    # the same data. The test set is untouched.
     batch_size = getattr(config, 'g_batch_size', 8)
-    valid_set = ValidDataset(graph, batch_size)
-    valid_dataloader = DataLoader(valid_set, batch_size=1, num_workers=0)
-    
+    train_facts, select_facts = split_facts_per_relation(
+        graph.valid_facts, train_ratio=0.5, seed=42
+    )
+    print(f"Valid split for beta training: "
+          f"{len(train_facts)} train / {len(select_facts)} select "
+          f"(from {len(graph.valid_facts)} total valid facts)")
+
+    valid_train_set = FactListValidDataset(graph, batch_size, train_facts)
+    valid_train_loader = DataLoader(valid_train_set, batch_size=1, num_workers=0)
+
+    valid_select_set = FactListValidDataset(graph, batch_size, select_facts)
+    valid_select_loader = DataLoader(valid_select_set, batch_size=1, num_workers=0)
+
     test_set = TestDataset(graph, batch_size)
     test_dataloader = DataLoader(test_set, batch_size=1, num_workers=0)
     
@@ -291,19 +376,19 @@ def main():
     best_beta = model.beta.data.clone()
     
     for epoch in range(args.epochs):
-        loss = train_beta_epoch(model, valid_dataloader, optimizer, device, adaptive=False)
+        loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False)
         model.eval()
-        val_metrics = evaluate(model, valid_dataloader, device, use_beta=True)
-        
+        val_metrics = evaluate(model, valid_select_loader, device, use_beta=True)
+
         print(f"\nEpoch {epoch+1}/{args.epochs}:")
         print(f"  Loss: {loss:.4f}")
-        print(f"  Valid MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
-        
+        print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+
         if val_metrics['MRR'] > best_mrr:
             best_mrr = val_metrics['MRR']
             best_beta = model.beta.data.clone()
             print(f"  New best MRR!")
-    
+
     model.beta.data = best_beta
     
     print(f"\n[4] Testing with TRAINED per-relation beta...")
@@ -328,13 +413,13 @@ def main():
     best_density = model.beta_density.data.clone()
     
     for epoch in range(args.epochs):
-        loss = train_beta_epoch(model, valid_dataloader, optimizer_adaptive, device, adaptive=True)
+        loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True)
         model.eval()
-        val_metrics = evaluate(model, valid_dataloader, device, adaptive_beta=True)
-        
+        val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True)
+
         print(f"\nEpoch {epoch+1}/{args.epochs}:")
         print(f"  Loss: {loss:.4f}")
-        print(f"  Valid MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+        print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
         print(f"  beta_density = {model.beta_density.item():.4f}")
         
         if val_metrics['MRR'] > best_mrr_adaptive:
