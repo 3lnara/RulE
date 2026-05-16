@@ -29,17 +29,27 @@ def parse_args():
     return parser.parse_args()
 
 
-def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alpha=3.0):
-    """Evaluate the model."""
+def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alpha=3.0,
+             return_per_query=False):
+    """Evaluate the model.
+
+    If `return_per_query` is True, additionally returns:
+      - ranks   : tensor [num_queries] of per-query (filtered, tie-averaged) ranks
+      - density : tensor [num_queries] of per-query rule grounding density,
+                  computed the same way as `model.compute_adaptive_beta`
+                  (fraction of candidate entities with positive rule signal).
+    These are needed for the per-bucket analysis printed at the end of main().
+    """
     model.eval()
-    
+
     concat_logits = []
     concat_all_h = []
     concat_all_r = []
     concat_all_t = []
     concat_flag = []
     concat_mask = []
-    
+    concat_density = [] if return_per_query else None
+
     with torch.no_grad():
         for batch in dataloader:
             all_h, all_r, all_t, flag = batch
@@ -47,30 +57,40 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             all_r = all_r.squeeze(0).to(device)
             all_t = all_t.squeeze(0).to(device)
             flag = flag.squeeze(0).to(device)
-            
-            # Forward pass
-            logits, mask = model(all_h, all_r, None)
-            
-            # Combine with KGE
+
+            # Forward pass: raw rule scores (with bias added, see model.forward)
+            rule_logits, mask = model(all_h, all_r, None)
+
+            # Per-query rule-grounding density: fraction of candidate entities
+            # for which at least one rule fired. Read from the model's stash
+            # populated by forward() -- this is the *same* signal that
+            # compute_adaptive_beta uses, so the bucket edges line up with the
+            # feature the adaptive head conditions on. NOTE: computing density
+            # from rule_logits.min() / eps was wrong -- self.bias variance
+            # collapsed it to ~1 for every query (see compute_adaptive_beta).
+            if return_per_query:
+                density = model._last_ground_mask.float().mean(dim=-1)  # [batch]
+                concat_density.append(density.detach())
+
             kge_score = model.compute_g_KGE(all_h, all_r)
-            
+
             if adaptive_beta:
-                beta, _ = model.compute_adaptive_beta(logits, all_r)
-                logits = beta * logits + (1 - beta) * kge_score
+                beta, _ = model.compute_adaptive_beta(rule_logits, all_r)
+                logits = beta * rule_logits + (1 - beta) * kge_score
             elif use_beta:
                 beta = torch.sigmoid(model.beta[all_r[0]]).unsqueeze(-1)
-                logits = beta * logits + (1 - beta) * kge_score
+                logits = beta * rule_logits + (1 - beta) * kge_score
             else:
                 # Use fixed alpha
-                logits = logits + alpha * kge_score
-            
+                logits = rule_logits + alpha * kge_score
+
             concat_logits.append(logits)
             concat_all_h.append(all_h)
             concat_all_r.append(all_r)
             concat_all_t.append(all_t)
             concat_flag.append(flag)
             concat_mask.append(mask)
-    
+
     # Concatenate all batches
     concat_logits = torch.cat(concat_logits, dim=0)
     concat_all_h = torch.cat(concat_all_h, dim=0)
@@ -78,7 +98,7 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
     concat_all_t = torch.cat(concat_all_t, dim=0)
     concat_flag = torch.cat(concat_flag, dim=0)
     concat_mask = torch.cat(concat_mask, dim=0)
-    
+
     # Compute ranks
     ranks = []
     for k in range(concat_all_t.size(0)):
@@ -91,9 +111,9 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             L = 1
             H = concat_flag.size(1) + 1
         ranks.append((L + H - 1) / 2.0)
-    
+
     ranks = torch.tensor(ranks, dtype=torch.float)
-    
+
     metrics = {
         'Hit@1': (ranks <= 1).float().mean().item(),
         'Hit@3': (ranks <= 3).float().mean().item(),
@@ -101,7 +121,10 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
         'MR': ranks.mean().item(),
         'MRR': (1.0 / ranks).mean().item()
     }
-    
+
+    if return_per_query:
+        densities = torch.cat(concat_density, dim=0).cpu()
+        return metrics, ranks, densities
     return metrics
 
 
@@ -184,6 +207,83 @@ def print_results(name, metrics):
     print(f"{'='*60}")
     for k, v in metrics.items():
         print(f"  {k}: {v:.4f}")
+
+
+def print_bucket_analysis(method_to_ranks, densities, num_buckets=5, title="PER-BUCKET ANALYSIS (test set, bucketed by rule grounding density)"):
+    """Print per-bucket MRR/Hit@10 across multiple combination methods.
+
+    Args:
+        method_to_ranks: dict[str, Tensor[num_queries]] - per-query (filtered, tie-averaged)
+                         rank for each method. All tensors must share the same length
+                         and per-index correspondence with `densities`.
+        densities: Tensor[num_queries] - per-query rule grounding density (CPU is fine).
+        num_buckets: number of quantile buckets to use over the strictly-positive
+                     densities. A separate "zero" bucket is reported if any queries
+                     have density ~= 0.
+
+    The "zero" bucket isolates queries where rule grounding effectively produced
+    no signal (only the bias term contributes). The remaining queries are split
+    into `num_buckets` equally-sized quantile buckets so each row is large
+    enough to give a stable MRR estimate.
+    """
+    print(f"\n{'='*80}")
+    print(title)
+    print(f"{'='*80}")
+
+    if isinstance(densities, torch.Tensor):
+        d = densities.detach().cpu().float()
+    else:
+        d = torch.tensor(densities, dtype=torch.float)
+    n_total = d.numel()
+
+    if n_total == 0:
+        print("  (no queries to bucket)")
+        return
+
+    # Header
+    method_names = list(method_to_ranks.keys())
+    header = f"{'Bucket':<26} {'n':>6}  " + "  ".join(f"{m:>11}" for m in method_names)
+    print(header)
+    print("-" * len(header))
+
+    def _row(bucket_label, mask):
+        n = int(mask.sum().item())
+        if n == 0:
+            return
+        cells = []
+        for name in method_names:
+            r = method_to_ranks[name][mask].float()
+            mrr = (1.0 / r).mean().item()
+            cells.append(f"{mrr:>11.4f}")
+        print(f"{bucket_label:<26} {n:>6}  " + "  ".join(cells))
+
+    # Isolate zero-density queries as their own bucket: this is where the rule
+    # signal collapses to the bias term, i.e. the model relies entirely on KGE
+    # plus a constant. Splitting them out avoids smearing that distinct regime
+    # across the lowest quantile of "real" rule-firing queries.
+    zero_mask = d <= 1e-9
+    nonzero_mask = ~zero_mask
+
+    if zero_mask.any():
+        _row("zero (no rule signal)", zero_mask)
+
+    if nonzero_mask.any():
+        d_nz = d[nonzero_mask]
+        # Quantile cut points: e.g. num_buckets=5 -> 6 cut points -> 5 buckets
+        probs = torch.linspace(0.0, 1.0, num_buckets + 1)
+        cuts = torch.quantile(d_nz, probs).tolist()
+        # Guard against degenerate distributions where many densities are equal:
+        # the quantile boundary can repeat, which would create empty buckets.
+        for b in range(num_buckets):
+            lo, hi = cuts[b], cuts[b + 1]
+            if b < num_buckets - 1:
+                bucket_mask = nonzero_mask & (d >= lo) & (d < hi)
+            else:
+                bucket_mask = nonzero_mask & (d >= lo) & (d <= hi)
+            label = f"Q{b+1} [{lo:.4f}, {hi:.4f}]"
+            _row(label, bucket_mask)
+
+    print(f"\n  Total queries: {n_total}   Density range: [{d.min().item():.4f}, {d.max().item():.4f}]")
 
 
 def print_beta_stats(model):
@@ -355,8 +455,15 @@ def main():
     print(f"{'='*60}")
     
     # === Baseline: Fixed Alpha ===
+    # Capture per-query ranks + densities here (and at the two later test evals)
+    # so we can do a per-bucket comparison at the end. Densities are a property
+    # of the (h, r) query and the rule outputs only, so they're identical across
+    # the three calls -- we keep the value from the very first call.
     print(f"\n[1] Testing with FIXED ALPHA = {args.alpha} (baseline)...")
-    metrics_fixed = evaluate(model, test_dataloader, device, use_beta=False, alpha=args.alpha)
+    metrics_fixed, ranks_fixed, test_densities = evaluate(
+        model, test_dataloader, device, use_beta=False, alpha=args.alpha,
+        return_per_query=True,
+    )
     print_results(f"Fixed Alpha (alpha={args.alpha})", metrics_fixed)
     
     # === Per-relation Beta before training ===
@@ -392,7 +499,9 @@ def main():
     model.beta.data = best_beta
     
     print(f"\n[4] Testing with TRAINED per-relation beta...")
-    metrics_beta_after = evaluate(model, test_dataloader, device, use_beta=True)
+    metrics_beta_after, ranks_beta, _ = evaluate(
+        model, test_dataloader, device, use_beta=True, return_per_query=True,
+    )
     print_results("Per-relation Beta (trained)", metrics_beta_after)
     print_beta_stats(model)
     
@@ -432,7 +541,9 @@ def main():
     model.beta_density.data = best_density
     
     print(f"\n[7] Testing with TRAINED adaptive beta...")
-    metrics_adaptive_after = evaluate(model, test_dataloader, device, adaptive_beta=True)
+    metrics_adaptive_after, ranks_adaptive, _ = evaluate(
+        model, test_dataloader, device, adaptive_beta=True, return_per_query=True,
+    )
     print_results("Adaptive Beta (trained)", metrics_adaptive_after)
     print_beta_stats(model)
     
@@ -456,6 +567,21 @@ def main():
         print("Interpretation: Dense groundings -> trust KGE more (counterintuitive)")
     else:
         print("Interpretation: Grounding density has no effect")
+
+    # === Per-bucket analysis ===
+    # Slice the test set by grounding density (the same feature the model uses
+    # for adaptive mixing) and report MRR per bucket per method. This is what
+    # actually answers "do rules help more on dense queries?" and reveals which
+    # density regime, if any, benefits from adaptive beta.
+    print_bucket_analysis(
+        method_to_ranks={
+            f"Fixed α={args.alpha}": ranks_fixed,
+            "Rel-Beta": ranks_beta,
+            "Adaptive": ranks_adaptive,
+        },
+        densities=test_densities,
+        num_buckets=5,
+    )
 
 
 if __name__ == '__main__':

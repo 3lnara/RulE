@@ -57,6 +57,12 @@ class RulE(torch.nn.Module):
         # beta(h,r) = sigmoid(beta_rel[r] + beta_density * density(h,r))
         self.beta_density = nn.Parameter(torch.zeros(1))
 
+        # Populated by forward(); a boolean [batch, num_entities] tensor
+        # whose True positions are "at least one rule fired here". Used by
+        # compute_adaptive_beta and by the per-bucket analysis to get a
+        # density signal that isn't contaminated by self.bias variance.
+        self._last_ground_mask = None
+
         self.epsilon = 2.0
 
         
@@ -383,7 +389,18 @@ class RulE(torch.nn.Module):
         _mem(f"after grounding loop  num_rules={len(rule_index)}")
 
         if mask.sum().item() == 0:
+            # No rule fired for any query in this batch. Stash an all-False
+            # grounding mask so any consumer of self._last_ground_mask
+            # (compute_adaptive_beta, the per-bucket density analysis) sees
+            # density = 0 for every query, which is the correct value here.
+            self._last_ground_mask = torch.zeros_like(mask, dtype=torch.bool)
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
+
+        # Snapshot the pre-bias grounding mask before `mask` is overwritten
+        # below. True iff at least one rule fired on that (query, entity) pair.
+        # This is the actual "rule-grounding density" signal -- the post-bias
+        # score variance is dominated by self.bias and is not a usable proxy.
+        self._last_ground_mask = (mask > 0)
 
         candidate_set = torch.nonzero(mask.view(-1), as_tuple=True)[0]
         _mem(f"after candidate_set  C={candidate_set.size(0)}")
@@ -441,17 +458,29 @@ class RulE(torch.nn.Module):
         """
         Query-adaptive beta combining per-relation bias and grounding density.
 
+        Density here is the *true* fraction of candidate entities for which at
+        least one rule fired -- read from self._last_ground_mask, which
+        forward() populates on every call. The previous implementation derived
+        density from (rule_score - rule_score.min()) > eps, but rule_score
+        already has the learned per-entity bias added in, and the bias variance
+        was large enough (e.g. on UMLS / Family) to push density to ~1 for
+        essentially every query. That collapsed the feature to a constant, so
+        beta_density became a constant offset absorbed by beta[r].
+
         Args:
-            rule_score: [batch, num_entities] rule grounding scores from forward()
-            all_r:      [batch] relation indices
+            rule_score: [batch, num_entities] (kept for API stability, unused).
+            all_r:      [batch] relation indices.
 
         Returns:
-            beta:    [batch, 1] adaptive beta in (0, 1)
-            density: [batch] grounding density per query (for interpretability)
+            beta:    [batch, 1] adaptive beta in (0, 1).
+            density: [batch] grounding density per query (for interpretability).
         """
-        min_score = rule_score.min(dim=-1, keepdim=True)[0]
-        grounded = ((rule_score - min_score) > 1e-6).float()
-        density = grounded.mean(dim=-1)
+        if self._last_ground_mask is None:
+            raise RuntimeError(
+                "compute_adaptive_beta requires forward() to have been called "
+                "first in this iteration; self._last_ground_mask is None."
+            )
+        density = self._last_ground_mask.float().mean(dim=-1)   # [batch]
 
         logit = self.beta[all_r] + self.beta_density * density
         beta = torch.sigmoid(logit).unsqueeze(-1)

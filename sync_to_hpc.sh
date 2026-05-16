@@ -140,12 +140,17 @@ run_rsync "${DEST_BASE}/data/umls/" \
   "${SCRIPT_DIR}/data/umls/" \
   || OVERALL_EXIT=$?
 
+run_rsync "${DEST_BASE}/data/FB15k-237/" \
+  "${SCRIPT_DIR}/data/FB15k-237/" \
+  || OVERALL_EXIT=$?
+
 # 3. config files → remote config/
 run_rsync "${DEST_BASE}/config/" \
   "${SCRIPT_DIR}/config/family_config.json" \
   "${SCRIPT_DIR}/config/wn18rr_config.json" \
   "${SCRIPT_DIR}/config/umls_hpc.json" \
   "${SCRIPT_DIR}/config/wn18rr_hpc.json" \
+  "${SCRIPT_DIR}/config/fb15k237_hpc.json" \
   "${SCRIPT_DIR}/config/family_comparison_hpc.json" \
   || OVERALL_EXIT=$?
 
@@ -163,6 +168,7 @@ run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/gat_grounding_only.slurm" \
   "${SCRIPT_DIR}/rule_comparison_gpu.slurm" \
   "${SCRIPT_DIR}/rule_original_wn18rr.slurm" \
+  "${SCRIPT_DIR}/rule_original_fb15k237.slurm" \
   "${SCRIPT_DIR}/rule_original_umls.slurm" \
   "${SCRIPT_DIR}/confidence_grounding_only.slurm" \
   "${SCRIPT_DIR}/setup_env_hpc.sh" \

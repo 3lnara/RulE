@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=adaptive_beta_only_umls
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --constraint=v100
-#SBATCH --time=02:30:00
+#SBATCH --time=00:30:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
