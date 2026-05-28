@@ -57,7 +57,7 @@ GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 # Adaptive-beta hyper-parameters
 BETA_EPOCHS=10
 BETA_LR=0.01
-BETA_DENSITY_LR=0.01
+BETA_DENSITY_LR=0.001
 FIXED_ALPHA=1.0   # baseline alpha for comparison table
 
 echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"

@@ -45,6 +45,7 @@ echo ""
 ORIG_OUTPUT="$HOME/RulE/outputs/umls"
 PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
 GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
+BETA_CHECKPOINT="${ORIG_OUTPUT}/beta.pt"
 
 # Config file — same one used for the original run
 CONFIG="$HOME/RulE/config/umls_hpc.json"
@@ -103,6 +104,8 @@ python3 -u "$HOME/RulE/scripts/train_beta_grounding.py" \
     --lr      "${BETA_LR}" \
     --density_lr "${BETA_DENSITY_LR}" \
     --alpha   "${FIXED_ALPHA}" \
+    --seed 42 \
+    --beta_checkpoint "${BETA_CHECKPOINT}" \
     2>&1 | tee "${SAVE_PATH}/beta_training.log"
 
 TRAIN_RC=${PIPESTATUS[0]}

@@ -24,8 +24,23 @@ def parse_args():
     parser.add_argument('--epochs', type=int, default=10)
     parser.add_argument('--lr', type=float, default=0.01)
     parser.add_argument('--density_lr', type=float, default=0.01)
-    parser.add_argument('--alpha', type=float, default=3.0, 
+    parser.add_argument('--alpha', type=float, default=3.0,
                        help='Fixed alpha for comparison baseline')
+    # Reproducibility / persistence ------------------------------------------
+    parser.add_argument('--seed', type=int, default=42,
+                       help='Global RNG seed (torch / random / cuda) and seed '
+                            'for the per-relation valid split. Default 42 '
+                            'matches the previously-hardcoded behaviour.')
+    parser.add_argument('--beta_checkpoint', type=str, default=None,
+                       help='Path to load/save the trained beta + beta_density '
+                            'tensors. If unset, defaults to <basecheckpoint_dir>/beta.pt. '
+                            'After full training the tensors are saved here; '
+                            'with --skip_beta_training, they are loaded from here.')
+    parser.add_argument('--skip_beta_training', action='store_true',
+                       help='Skip stages [2], [3], [5], [6]: load already-trained '
+                            'beta and beta_density from --beta_checkpoint and run '
+                            'only the test evaluations + post-eval analyses. '
+                            'Useful for cheap iteration on diagnostics.')
     return parser.parse_args()
 
 
@@ -34,21 +49,32 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
     """Evaluate the model.
 
     Ranks are computed per-batch and moved to CPU immediately so the GPU never
-    holds more than one batch of [batch, num_entities] logits at a time.  This
+    holds more than one batch of [batch, num_entities] logits at a time. This
     is critical for large datasets such as WN18RR (40 943 entities).
 
-    If `return_per_query` is True, additionally returns:
-      - ranks   : tensor [num_queries] of per-query (filtered, tie-averaged) ranks.
-      - density : tensor [num_queries] of per-query rule grounding density
-                  (fraction of candidate entities for which >=1 rule fired),
-                  read from model._last_ground_mask -- the same signal that
-                  compute_adaptive_beta conditions on. Reduced on GPU to a
-                  single float per query before transfer, so the extra cost is
-                  one [batch] tensor copy per batch (negligible).
+    If `return_per_query` is True, returns (metrics, per_query_dict). The dict
+    keys mirror what the post-eval analyses need:
+      - 'ranks'      : Tensor[N]  filtered, tie-averaged rank per query.
+      - 'densities'  : Tensor[N]  rule grounding density per query (same signal
+                                  that compute_adaptive_beta conditions on).
+      - 'relations'  : Tensor[N]  relation id per query (long).
+      - 'top1'       : Tensor[N]  predicted entity id (argmax over flag-True
+                                  candidates) under THIS method's mixed score.
+      - 'true_tails' : Tensor[N]  ground-truth tail entity id per query.
+      - 'corr'       : Tensor[N]  per-query Spearman correlation between the
+                                  pre-mix rule score and the kge_score over all
+                                  candidate entities. Method-invariant.
+    All tensors are on CPU and aligned by index. Memory: per-batch transients
+    are freed by the existing `empty_cache()` call; only O(num_queries) floats
+    accumulate across the eval loop.
     """
     model.eval()
     all_ranks = []
     all_densities = [] if return_per_query else None
+    all_corr      = [] if return_per_query else None
+    all_relations = [] if return_per_query else None
+    all_top1      = [] if return_per_query else None
+    all_true      = [] if return_per_query else None
 
     with torch.no_grad():
         for batch in dataloader:
@@ -58,13 +84,13 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             all_t = all_t.squeeze(0).to(device)
             flag = flag.squeeze(0).to(device)
 
-            # Forward pass (populates model._last_ground_mask)
-            logits, mask = model(all_h, all_r, None)
+            # Forward pass (populates model._last_ground_mask). Keep
+            # `rule_logits` distinct from the mixed `logits` -- we need it
+            # below for the rule/KGE rank correlation.
+            rule_logits, mask = model(all_h, all_r, None)
 
-            # Read per-query density BEFORE we delete/recycle anything.
-            # mean(dim=-1) reduces [batch, num_entities] bool -> [batch] float,
-            # and .cpu() drops it off the GPU immediately. For WN18RR a single
-            # batch of size 4 this is 4 floats moved to CPU -- trivial.
+            # Read per-query density. mean(dim=-1) reduces [batch, num_entities]
+            # bool -> [batch] float; .cpu() drops it off the GPU immediately.
             if return_per_query:
                 density_batch = model._last_ground_mask.float().mean(dim=-1).cpu()
                 all_densities.append(density_batch)
@@ -72,21 +98,38 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             # Combine with KGE
             kge_score = model.compute_g_KGE(all_h, all_r)
 
+            # Per-query Spearman corr between rule and KGE rankings (Pearson on
+            # rank vectors via argsort().argsort()). Computed once per batch on
+            # GPU, reduced to one float per query, then moved to CPU. Frees its
+            # temporaries before mixing so peak GPU memory does not grow.
+            if return_per_query:
+                ra = rule_logits.argsort(dim=-1).argsort(dim=-1).float()
+                rb = kge_score.argsort(dim=-1).argsort(dim=-1).float()
+                a_c = ra - ra.mean(dim=-1, keepdim=True)
+                b_c = rb - rb.mean(dim=-1, keepdim=True)
+                num = (a_c * b_c).sum(dim=-1)
+                denom = torch.sqrt(
+                    (a_c ** 2).sum(dim=-1) * (b_c ** 2).sum(dim=-1)
+                ).clamp_min(1e-12)
+                all_corr.append((num / denom).detach().cpu())
+                del ra, rb, a_c, b_c, num, denom
+
             if adaptive_beta:
-                beta, _ = model.compute_adaptive_beta(logits, all_r)
-                logits = beta * logits + (1 - beta) * kge_score
+                beta, _ = model.compute_adaptive_beta(rule_logits, all_r)
+                logits = beta * rule_logits + (1 - beta) * kge_score
             elif use_beta:
                 beta = torch.sigmoid(model.beta[all_r[0]]).unsqueeze(-1)
-                logits = beta * logits + (1 - beta) * kge_score
+                logits = beta * rule_logits + (1 - beta) * kge_score
             else:
-                logits = logits + alpha * kge_score
+                logits = rule_logits + alpha * kge_score
 
             # Move to CPU immediately — avoids accumulating GB of GPU tensors
             logits_cpu = logits.cpu()
             flag_cpu = flag.cpu()
             mask_cpu = mask.cpu()
             all_t_cpu = all_t.cpu()
-            del logits, kge_score
+            all_r_cpu = all_r.cpu() if return_per_query else None
+            del logits, kge_score, rule_logits
             if device.type == "cuda":
                 torch.cuda.empty_cache()
 
@@ -101,6 +144,18 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
                     H = flag_cpu.size(1) + 1
                 all_ranks.append((L + H - 1) / 2.0)
 
+                if return_per_query:
+                    # argmax over flag-True candidates, mapped back to global
+                    # entity id. Done per query inside the existing CPU loop.
+                    cand_idx = flag_cpu[k].nonzero(as_tuple=True)[0]
+                    cand_scores = logits_cpu[k][cand_idx]
+                    top1_pos = cand_scores.argmax().item()
+                    all_top1.append(int(cand_idx[top1_pos].item()))
+
+            if return_per_query:
+                all_relations.append(all_r_cpu)
+                all_true.append(all_t_cpu)
+
     ranks = torch.tensor(all_ranks, dtype=torch.float)
     metrics = {
         'Hit@1': (ranks <= 1).float().mean().item(),
@@ -111,8 +166,14 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
     }
 
     if return_per_query:
-        densities = torch.cat(all_densities, dim=0)
-        return metrics, ranks, densities
+        return metrics, {
+            'ranks':      ranks,
+            'densities':  torch.cat(all_densities, dim=0),
+            'relations':  torch.cat(all_relations, dim=0).long(),
+            'top1':       torch.tensor(all_top1, dtype=torch.long),
+            'true_tails': torch.cat(all_true, dim=0).long(),
+            'corr':       torch.cat(all_corr, dim=0),
+        }
     return metrics
 
 
@@ -231,26 +292,16 @@ def print_results(name, metrics):
         print(f"  {k}: {v:.4f}")
 
 
-def print_bucket_analysis(method_to_ranks, densities, num_buckets=5, title="PER-BUCKET ANALYSIS (test set, bucketed by rule grounding density)"):
-    """Print per-bucket MRR across multiple combination methods.
+def print_bucket_analysis(method_to_ranks, densities, num_buckets=5,
+                          title="PER-BUCKET ANALYSIS (test set, bucketed by rule grounding density)"):
+    """Print per-bucket MRR / Hit@1 / Hit@10 / MR across combination methods.
 
-    Args:
-        method_to_ranks: dict[str, Tensor[num_queries]] - per-query (filtered,
-                         tie-averaged) rank for each method. All tensors must
-                         share the same length and per-index correspondence
-                         with `densities`.
-        densities:       Tensor[num_queries] - per-query rule grounding density.
-        num_buckets:     number of quantile buckets over strictly-positive
-                         densities. A separate "zero" bucket is reported if any
-                         queries have density ~= 0 (no rule fired).
+    Layout is one row per (bucket, method): for each density bucket we emit
+    one block of method rows, with MRR, Hit@1, Hit@10, MR as columns. This
+    lets the reader see *which* aspect of the ranking moved (e.g. MR can change
+    while MRR is stationary).
 
-    The "zero" bucket isolates queries where rule grounding produced no signal
-    (only the bias term contributes). The remaining queries are split into
-    `num_buckets` equally-sized quantile buckets so each row is large enough to
-    give a stable MRR estimate.
-
-    Memory: this is pure CPU bookkeeping over O(num_queries) floats. Safe for
-    WN18RR (a few thousand test queries).
+    Memory: pure CPU bookkeeping over O(num_queries) floats. Safe for WN18RR.
     """
     print(f"\n{'='*80}")
     print(title)
@@ -267,20 +318,34 @@ def print_bucket_analysis(method_to_ranks, densities, num_buckets=5, title="PER-
         return
 
     method_names = list(method_to_ranks.keys())
-    header = f"{'Bucket':<26} {'n':>6}  " + "  ".join(f"{m:>11}" for m in method_names)
+    name_w = max(len(m) for m in method_names) + 2
+
+    header = (
+        f"{'Bucket':<26} {'n':>6}  "
+        f"{'Method':<{name_w}}"
+        f"{'MRR':>10}  {'Hit@1':>10}  {'Hit@10':>10}  {'MR':>10}"
+    )
     print(header)
     print("-" * len(header))
 
-    def _row(bucket_label, mask):
+    def _row_block(bucket_label, mask):
         n = int(mask.sum().item())
         if n == 0:
             return
-        cells = []
-        for name in method_names:
+        for i, name in enumerate(method_names):
             r = method_to_ranks[name][mask].float()
             mrr = (1.0 / r).mean().item()
-            cells.append(f"{mrr:>11.4f}")
-        print(f"{bucket_label:<26} {n:>6}  " + "  ".join(cells))
+            h1 = (r <= 1).float().mean().item()
+            h10 = (r <= 10).float().mean().item()
+            mr = r.mean().item()
+            if i == 0:
+                prefix = f"{bucket_label:<26} {n:>6}  "
+            else:
+                prefix = f"{'':<26} {'':>6}  "
+            print(
+                f"{prefix}{name:<{name_w}}"
+                f"{mrr:>10.4f}  {h1:>10.4f}  {h10:>10.4f}  {mr:>10.2f}"
+            )
 
     # Isolate zero-density queries as their own bucket: rule signal collapses
     # to the bias term, distinct regime from low-but-positive density.
@@ -288,15 +353,12 @@ def print_bucket_analysis(method_to_ranks, densities, num_buckets=5, title="PER-
     nonzero_mask = ~zero_mask
 
     if zero_mask.any():
-        _row("zero (no rule signal)", zero_mask)
+        _row_block("zero (no rule signal)", zero_mask)
 
     if nonzero_mask.any():
         d_nz = d[nonzero_mask]
         probs = torch.linspace(0.0, 1.0, num_buckets + 1)
         cuts = torch.quantile(d_nz, probs).tolist()
-        # Quantile boundaries can repeat when many densities are identical
-        # (e.g. dense KGs); the resulting buckets just print as empty rows,
-        # which is the right behaviour -- it surfaces a degenerate feature.
         for b in range(num_buckets):
             lo, hi = cuts[b], cuts[b + 1]
             if b < num_buckets - 1:
@@ -304,9 +366,243 @@ def print_bucket_analysis(method_to_ranks, densities, num_buckets=5, title="PER-
             else:
                 bucket_mask = nonzero_mask & (d >= lo) & (d <= hi)
             label = f"Q{b+1} [{lo:.4f}, {hi:.4f}]"
-            _row(label, bucket_mask)
+            _row_block(label, bucket_mask)
 
     print(f"\n  Total queries: {n_total}   Density range: [{d.min().item():.4f}, {d.max().item():.4f}]")
+
+
+def print_per_relation_table(method_to_ranks, relations, model, densities,
+                             fixed_method_name, adaptive_method_name, top_n=None):
+    """Per-relation breakdown linking learned beta[r] to per-relation MRR.
+
+    For each relation that appears in the test set, prints:
+      n            number of test queries with this relation,
+      beta[r]      sigmoid(model.beta[r]) -- the learned per-relation rule weight,
+      dens_mean    mean grounding density of test queries for this relation,
+      one column per method: per-relation MRR,
+      dMRR(A-F)    MRR(adaptive_method_name) - MRR(fixed_method_name).
+
+    Rows are sorted by |beta[r] - 0.5| descending so the most extreme routings
+    are at the top -- that's where any per-relation effect should show up first.
+    """
+    print(f"\n{'='*80}")
+    print("PER-RELATION TABLE (sorted by |beta[r] - 0.5| descending)")
+    print(f"{'='*80}")
+
+    relations = relations.cpu().long()
+    densities = densities.cpu().float()
+
+    with torch.no_grad():
+        beta_sigmoid = torch.sigmoid(model.beta).detach().cpu()
+
+    method_names = list(method_to_ranks.keys())
+
+    rows = []
+    for r in sorted(set(relations.tolist())):
+        rel_mask = (relations == r)
+        n = int(rel_mask.sum().item())
+        if n == 0:
+            continue
+        beta_r = beta_sigmoid[r].item() if r < beta_sigmoid.numel() else float('nan')
+        dens_mean = densities[rel_mask].mean().item()
+        per_method = {}
+        for name in method_names:
+            ranks_r = method_to_ranks[name][rel_mask].float()
+            per_method[name] = (1.0 / ranks_r).mean().item()
+        d_mrr = per_method[adaptive_method_name] - per_method[fixed_method_name]
+        rows.append({
+            'r': r, 'n': n, 'beta': beta_r, 'dens_mean': dens_mean,
+            'per_method': per_method, 'd_mrr': d_mrr,
+        })
+
+    rows.sort(key=lambda x: abs(x['beta'] - 0.5), reverse=True)
+    if top_n is not None:
+        rows = rows[:top_n]
+
+    method_header = "  ".join(f"{m:>11}" for m in method_names)
+    header = (
+        f"{'r':>4}  {'n':>6}  {'beta[r]':>9}  {'dens_mean':>10}  "
+        f"{method_header}  {'dMRR(A-F)':>11}"
+    )
+    print(header)
+    print("-" * len(header))
+
+    for row in rows:
+        cells = "  ".join(f"{row['per_method'][m]:>11.4f}" for m in method_names)
+        print(
+            f"{row['r']:>4}  {row['n']:>6}  {row['beta']:>9.4f}  {row['dens_mean']:>10.4f}  "
+            f"{cells}  {row['d_mrr']:>+11.4f}"
+        )
+
+
+def print_decision_flip_analysis(method_to_top1, true_tails, pairs,
+                                 relations=None, model=None):
+    """Decision-flip stats for each (method_A, method_B) pair.
+
+    Global block, for every pair: flips, A_correct_only, B_correct_only,
+    neither_correct, and the Hit@1 delta from those flips ((B - A) / N).
+
+    Per-relation block (printed only when both `relations` and `model` are
+    given): for each relation that has at least one flip, prints n, beta[r],
+    flips, A_only, B_only, neither, and the *local* Hit@1 delta within that
+    relation. Sorted by |local Hit@1 delta| descending.
+
+    Args:
+        method_to_top1: dict[str, Tensor[N]] of per-query top-1 entity ids.
+        true_tails:     Tensor[N] of ground-truth tail ids.
+        pairs:          list of (name_A, name_B). Report framed as "B over A".
+        relations:      optional Tensor[N] of per-query relation ids.
+        model:          optional RulE model whose .beta provides beta[r].
+    """
+    print(f"\n{'='*80}")
+    print("DECISION-FLIP ANALYSIS")
+    print(f"{'='*80}")
+    n = true_tails.numel()
+    print(f"Total test queries: {n}\n")
+
+    rels_cpu = relations.cpu().long() if relations is not None else None
+    beta_sigmoid = None
+    if model is not None:
+        with torch.no_grad():
+            beta_sigmoid = torch.sigmoid(model.beta).detach().cpu()
+
+    for (a_name, b_name) in pairs:
+        a_top1 = method_to_top1[a_name]
+        b_top1 = method_to_top1[b_name]
+
+        flip_mask = (a_top1 != b_top1)
+        n_flips = int(flip_mask.sum().item())
+        if n_flips == 0:
+            print(f"  {b_name} vs {a_name}: 0 flips (identical top-1 predictions)\n")
+            continue
+
+        a_correct = (a_top1 == true_tails)
+        b_correct = (b_top1 == true_tails)
+
+        a_only = int((flip_mask & a_correct & ~b_correct).sum().item())
+        b_only = int((flip_mask & b_correct & ~a_correct).sum().item())
+        neither = int((flip_mask & ~a_correct & ~b_correct).sum().item())
+        # both_correct is impossible because the top-1s differ.
+
+        flip_rate = n_flips / n
+        hit1_delta = (b_only - a_only) / n
+
+        print(f"  {b_name} vs {a_name}:")
+        print(f"    flips:                   {n_flips:>6} ({flip_rate*100:5.2f}% of queries)")
+        print(f"    {a_name} correct only:   {a_only:>6}")
+        print(f"    {b_name} correct only:   {b_only:>6}")
+        print(f"    neither correct:         {neither:>6}")
+        print(f"    Hit@1 delta from flips: {hit1_delta:+.4f}")
+
+        if rels_cpu is not None:
+            rows = []
+            for r in sorted(set(rels_cpu.tolist())):
+                rel_mask = (rels_cpu == r)
+                rel_n = int(rel_mask.sum().item())
+                if rel_n == 0:
+                    continue
+                rel_flip = flip_mask & rel_mask
+                rel_n_flips = int(rel_flip.sum().item())
+                if rel_n_flips == 0:
+                    continue
+                rel_a_only = int((rel_flip & a_correct & ~b_correct).sum().item())
+                rel_b_only = int((rel_flip & b_correct & ~a_correct).sum().item())
+                rel_neither = int((rel_flip & ~a_correct & ~b_correct).sum().item())
+                # Normalize by n_in_relation so the column reads as the
+                # per-relation accuracy contribution from method B over A.
+                rel_dh1 = (rel_b_only - rel_a_only) / rel_n
+                beta_r = (
+                    beta_sigmoid[r].item()
+                    if beta_sigmoid is not None and r < beta_sigmoid.numel()
+                    else float('nan')
+                )
+                rows.append({
+                    'r': r, 'n': rel_n, 'beta': beta_r,
+                    'flips': rel_n_flips,
+                    'a_only': rel_a_only, 'b_only': rel_b_only, 'neither': rel_neither,
+                    'dh1': rel_dh1,
+                })
+            rows.sort(key=lambda x: abs(x['dh1']), reverse=True)
+            if rows:
+                print()
+                print(f"    Per-relation (relations with >=1 flip; sorted by |local dHit@1| desc):")
+                hdr = (
+                    f"      {'r':>4}  {'n':>6}  {'beta[r]':>9}  "
+                    f"{'flips':>6}  {'A_only':>6}  {'B_only':>6}  {'neither':>7}  "
+                    f"{'dHit@1':>9}"
+                )
+                print(hdr)
+                print("      " + "-" * (len(hdr) - 6))
+                for row in rows:
+                    print(
+                        f"      {row['r']:>4}  {row['n']:>6}  {row['beta']:>9.4f}  "
+                        f"{row['flips']:>6}  {row['a_only']:>6}  {row['b_only']:>6}  "
+                        f"{row['neither']:>7}  {row['dh1']:>+9.4f}"
+                    )
+        print()
+
+
+def print_headroom_diagnostic(corrs, densities, num_buckets=5):
+    """Mean Spearman correlation between rule and KGE rankings, plus per-bucket means.
+
+    Interpretation: if rule and KGE rank candidates near-identically (corr ~ 1),
+    *any* convex combination produces the same ranking, and no mixing strategy
+    -- including adaptive beta -- can move the metrics. This number upper-bounds
+    the headroom for routing.
+    """
+    print(f"\n{'='*80}")
+    print("HEADROOM DIAGNOSTIC (Spearman corr between rule and KGE rankings)")
+    print(f"{'='*80}")
+
+    c = corrs.detach().cpu().float()
+    d = densities.detach().cpu().float()
+
+    valid = ~torch.isnan(c)
+    if valid.sum() == 0:
+        print("  (no valid correlation values)")
+        return
+
+    cv = c[valid]
+    print(f"  Mean correlation:   {cv.mean().item():+.4f}")
+    print(f"  Median correlation: {cv.median().item():+.4f}")
+    print(f"  Std:                {cv.std().item():.4f}")
+    print(f"  Min/Max:            [{cv.min().item():+.4f}, {cv.max().item():+.4f}]\n")
+
+    print(f"  Per-density-bucket mean correlation:")
+    bh = f"  {'Bucket':<26} {'n':>6}  {'mean corr':>11}"
+    print(bh)
+    print("  " + "-" * (len(bh) - 2))
+
+    def _bucket_row(label, mask):
+        m = mask & valid
+        n = int(m.sum().item())
+        if n == 0:
+            return
+        print(f"  {label:<26} {n:>6}  {c[m].mean().item():>+11.4f}")
+
+    zero_mask = d <= 1e-9
+    nonzero_mask = ~zero_mask
+
+    if zero_mask.any():
+        _bucket_row("zero (no rule signal)", zero_mask)
+
+    if nonzero_mask.any():
+        d_nz = d[nonzero_mask]
+        probs = torch.linspace(0.0, 1.0, num_buckets + 1)
+        cuts = torch.quantile(d_nz, probs).tolist()
+        for b in range(num_buckets):
+            lo, hi = cuts[b], cuts[b + 1]
+            if b < num_buckets - 1:
+                bm = nonzero_mask & (d >= lo) & (d < hi)
+            else:
+                bm = nonzero_mask & (d >= lo) & (d <= hi)
+            _bucket_row(f"Q{b+1} [{lo:.4f}, {hi:.4f}]", bm)
+
+    print()
+    print("  Reading: corr ~ +1.0  =>  rule and KGE rank candidates near-identically;")
+    print("                            mixing has little headroom (any beta produces ~same ranking).")
+    print("           corr ~  0.0  =>  rankings independent; mixing has maximum potential.")
+    print("           corr ~ -1.0  =>  rankings opposite; mixing can swing strongly either way.")
 
 
 def print_beta_stats(model):
@@ -326,6 +622,31 @@ def print_beta_stats(model):
             print(f"    -> Negative: denser groundings push beta DOWN (trust KGE more)")
         else:
             print(f"    -> Zero: grounding density has no effect (pure per-relation beta)")
+
+
+def save_beta_checkpoint(path, model, **meta):
+    """Persist the trained beta tensors + metadata to a small .pt file.
+
+    The file contains:
+      - 'beta':         CPU clone of model.beta (per-relation, shape [2*R]).
+      - 'beta_density': CPU clone of model.beta_density (scalar).
+      - any keyword args passed in (e.g. seed, stage, base_checkpoint,
+        best_mrr_*, epoch_best_*).
+
+    Tiny -- a few hundred floats. Safe to call multiple times during a run
+    (e.g. after stage 3 and again after stage 6) so partial progress is
+    preserved if a job is interrupted.
+    """
+    state = {
+        'beta':         model.beta.data.detach().cpu().clone(),
+        'beta_density': model.beta_density.data.detach().cpu().clone(),
+        **meta,
+    }
+    parent = os.path.dirname(path)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
+    torch.save(state, path)
+    print(f"  Saved beta checkpoint -> {path}  (stage={meta.get('stage', '?')})")
 
 
 def split_facts_per_relation(facts, train_ratio=0.5, seed=42):
@@ -394,9 +715,23 @@ class FactListValidDataset(Dataset):
 
 def main():
     args = parse_args()
-    
+
+    # --- Reproducibility -----------------------------------------------------
+    # Seed the three RNG sources that affect this script:
+    #   - random            : used by FactListValidDataset and split_facts_per_relation.
+    #   - torch             : used by torch.randperm in train_beta_epoch's
+    #                         negative subsampling.
+    #   - torch.cuda        : kernels that use the device RNG.
+    # Without this, every run produced slightly different `beta` / `beta_density`
+    # tensors and the trained values were not reconstructible from logs.
+    random.seed(args.seed)
+    torch.manual_seed(args.seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(args.seed)
+
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
+    print(f"Seed: {args.seed}")
     
     # Load config
     config = load_config(args.config)
@@ -464,11 +799,28 @@ def main():
     # data. The test set is untouched.
     beta_batch_size = 4
     train_facts, select_facts = split_facts_per_relation(
-        graph.valid_facts, train_ratio=0.5, seed=42
+        graph.valid_facts, train_ratio=0.5, seed=args.seed
     )
     print(f"Valid split for beta training: "
           f"{len(train_facts)} train / {len(select_facts)} select "
           f"(from {len(graph.valid_facts)} total valid facts)")
+
+    # Resolve the beta-checkpoint path. Default: alongside the base checkpoint,
+    # named 'beta.pt'. This co-locates trained-mixing tensors with the base
+    # model checkpoint they were trained on top of.
+    if args.beta_checkpoint:
+        beta_ckpt_path = args.beta_checkpoint
+    else:
+        beta_ckpt_path = os.path.join(
+            os.path.dirname(os.path.abspath(args.checkpoint)) or '.',
+            'beta.pt',
+        )
+    print(f"Beta checkpoint path: {beta_ckpt_path}")
+    if args.skip_beta_training and not os.path.exists(beta_ckpt_path):
+        raise FileNotFoundError(
+            f"--skip_beta_training requires {beta_ckpt_path} to exist. "
+            f"Run without --skip_beta_training first to train and save the betas."
+        )
 
     valid_train_set = FactListValidDataset(graph, beta_batch_size, train_facts)
     valid_train_loader = DataLoader(valid_train_set, batch_size=1, num_workers=0)
@@ -484,95 +836,153 @@ def main():
     print(f"{'='*60}")
     
     # === Baseline: Fixed Alpha ===
-    # Capture per-query ranks + densities here (and at the two later test
-    # evals) so we can print a per-bucket comparison at the end. Densities are
-    # a property of (h, r) and the rule machinery, so they're identical across
-    # the three calls -- we keep the value from the first call.
+    # Capture per-query data here (and at the two later test evals) so we can
+    # run the post-eval analyses at the end. The dict contains:
+    #   ranks, densities, relations, top1, true_tails, corr.
+    # Of these, densities/relations/true_tails/corr are method-invariant -- we
+    # read them off the Fixed-alpha call only. top1 and ranks are method-specific.
     print(f"\n[1] Testing with FIXED ALPHA = {args.alpha} (baseline)...")
-    metrics_fixed, ranks_fixed, test_densities = evaluate(
+    metrics_fixed, pq_fixed = evaluate(
         model, test_dataloader, device, use_beta=False, alpha=args.alpha,
         return_per_query=True,
     )
     print_results(f"Fixed Alpha (alpha={args.alpha})", metrics_fixed)
     
-    # === Per-relation Beta before training ===
-    print(f"\n[2] Testing with PER-RELATION BETA (before training)...")
-    metrics_beta_before = evaluate(model, test_dataloader, device, use_beta=True)
-    print_results("Per-relation Beta (untrained)", metrics_beta_before)
-    print_beta_stats(model)
-    
-    # === Train per-relation Beta ===
-    print(f"\n[3] Training per-relation beta for {args.epochs} epochs...")
-    
-    model.beta.requires_grad = True
-    model.beta_density.requires_grad = False
-    optimizer = torch.optim.Adam([model.beta], lr=args.lr)
-    
-    best_mrr = 0
-    best_beta = model.beta.data.clone()
-    
-    for epoch in range(args.epochs):
-        loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False)
-        model.eval()
-        val_metrics = evaluate(model, valid_select_loader, device, use_beta=True)
+    # Default values used by the metadata save when training is skipped.
+    best_mrr = float('nan')
+    best_epoch_3 = -1
 
-        print(f"\nEpoch {epoch+1}/{args.epochs}:")
-        print(f"  Loss: {loss:.4f}")
-        print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+    if args.skip_beta_training:
+        # Load already-trained beta + beta_density and skip stages [2], [3].
+        beta_state = torch.load(beta_ckpt_path, map_location=device)
+        model.beta.data.copy_(beta_state['beta'].to(device))
+        model.beta_density.data.copy_(beta_state['beta_density'].to(device))
+        print(f"\n[2/3] SKIPPED -- loaded trained beta from {beta_ckpt_path}")
+        print(f"      seed:           {beta_state.get('seed', 'unknown')}")
+        print(f"      stage:          {beta_state.get('stage', 'unknown')}")
+        print(f"      best_mrr (3):   {beta_state.get('best_mrr_stage3', 'unknown')}")
+        print(f"      epoch_best (3): {beta_state.get('epoch_best_stage3', 'unknown')}")
+        print(f"      base_ckpt:      {beta_state.get('base_checkpoint', 'unknown')}")
+        best_mrr = beta_state.get('best_mrr_stage3', best_mrr)
+        best_epoch_3 = beta_state.get('epoch_best_stage3', best_epoch_3)
+        print_beta_stats(model)
+    else:
+        # === Per-relation Beta before training ===
+        print(f"\n[2] Testing with PER-RELATION BETA (before training)...")
+        metrics_beta_before = evaluate(model, test_dataloader, device, use_beta=True)
+        print_results("Per-relation Beta (untrained)", metrics_beta_before)
+        print_beta_stats(model)
 
-        if val_metrics['MRR'] > best_mrr:
-            best_mrr = val_metrics['MRR']
-            best_beta = model.beta.data.clone()
-            print(f"  New best MRR!")
+        # === Train per-relation Beta ===
+        print(f"\n[3] Training per-relation beta for {args.epochs} epochs...")
 
-    model.beta.data = best_beta
-    
+        model.beta.requires_grad = True
+        model.beta_density.requires_grad = False
+        optimizer = torch.optim.Adam([model.beta], lr=args.lr)
+
+        best_mrr = 0
+        best_beta = model.beta.data.clone()
+        best_epoch_3 = 0
+
+        for epoch in range(args.epochs):
+            loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False)
+            model.eval()
+            val_metrics = evaluate(model, valid_select_loader, device, use_beta=True)
+
+            print(f"\nEpoch {epoch+1}/{args.epochs}:")
+            print(f"  Loss: {loss:.4f}")
+            print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+
+            if val_metrics['MRR'] > best_mrr:
+                best_mrr = val_metrics['MRR']
+                best_beta = model.beta.data.clone()
+                best_epoch_3 = epoch + 1
+                print(f"  New best MRR!")
+
+        model.beta.data = best_beta
+
+        # Save progress after stage 3. beta_density is still 0 here; it will
+        # be overwritten by the post-stage-6 save below.
+        save_beta_checkpoint(
+            beta_ckpt_path, model,
+            stage='stage3',
+            seed=args.seed,
+            best_mrr_stage3=best_mrr,
+            epoch_best_stage3=best_epoch_3,
+            base_checkpoint=os.path.abspath(args.checkpoint),
+        )
+
     print(f"\n[4] Testing with TRAINED per-relation beta...")
-    metrics_beta_after, ranks_beta, _ = evaluate(
+    metrics_beta_after, pq_beta = evaluate(
         model, test_dataloader, device, use_beta=True, return_per_query=True,
     )
     print_results("Per-relation Beta (trained)", metrics_beta_after)
     print_beta_stats(model)
     
     # === Adaptive Beta ===
-    print(f"\n[5] Testing with ADAPTIVE BETA (before training)...")
-    metrics_adaptive_before = evaluate(model, test_dataloader, device, adaptive_beta=True)
-    print_results("Adaptive Beta (untrained)", metrics_adaptive_before)
-    
-    # Train adaptive beta (beta_rel + beta_density)
-    print(f"\n[6] Training adaptive beta for {args.epochs} epochs...")
-    
-    model.beta.requires_grad = False
-    model.beta_density.requires_grad = True
-    optimizer_adaptive = torch.optim.Adam(
-        [model.beta_density], lr=args.density_lr
-    )
-    
-    best_mrr_adaptive = 0
-    best_beta_adaptive = model.beta.data.clone()
-    best_density = model.beta_density.data.clone()
-    
-    for epoch in range(args.epochs):
-        loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True)
-        model.eval()
-        val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True)
+    best_mrr_adaptive = float('nan')
+    best_epoch_6 = -1
 
-        print(f"\nEpoch {epoch+1}/{args.epochs}:")
-        print(f"  Loss: {loss:.4f}")
-        print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
-        print(f"  beta_density = {model.beta_density.item():.4f}")
-        
-        if val_metrics['MRR'] > best_mrr_adaptive:
-            best_mrr_adaptive = val_metrics['MRR']
-            best_beta_adaptive = model.beta.data.clone()
-            best_density = model.beta_density.data.clone()
-            print(f"  New best MRR!")
-    
-    model.beta.data = best_beta_adaptive
-    model.beta_density.data = best_density
-    
+    if args.skip_beta_training:
+        # beta and beta_density were already loaded above; just skip [5] and [6].
+        print(f"\n[5/6] SKIPPED -- using loaded beta_density")
+        print(f"      best_mrr (6):   {beta_state.get('best_mrr_stage6', 'unknown')}")
+        print(f"      epoch_best (6): {beta_state.get('epoch_best_stage6', 'unknown')}")
+        best_mrr_adaptive = beta_state.get('best_mrr_stage6', best_mrr_adaptive)
+        best_epoch_6 = beta_state.get('epoch_best_stage6', best_epoch_6)
+    else:
+        print(f"\n[5] Testing with ADAPTIVE BETA (before training)...")
+        metrics_adaptive_before = evaluate(model, test_dataloader, device, adaptive_beta=True)
+        print_results("Adaptive Beta (untrained)", metrics_adaptive_before)
+
+        # Train adaptive beta (beta_rel + beta_density)
+        print(f"\n[6] Training adaptive beta for {args.epochs} epochs...")
+
+        model.beta.requires_grad = False
+        model.beta_density.requires_grad = True
+        optimizer_adaptive = torch.optim.Adam(
+            [model.beta_density], lr=args.density_lr
+        )
+
+        best_mrr_adaptive = 0
+        best_beta_adaptive = model.beta.data.clone()
+        best_density = model.beta_density.data.clone()
+        best_epoch_6 = 0
+
+        for epoch in range(args.epochs):
+            loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True)
+            model.eval()
+            val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True)
+
+            print(f"\nEpoch {epoch+1}/{args.epochs}:")
+            print(f"  Loss: {loss:.4f}")
+            print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+            print(f"  beta_density = {model.beta_density.item():.4f}")
+
+            if val_metrics['MRR'] > best_mrr_adaptive:
+                best_mrr_adaptive = val_metrics['MRR']
+                best_beta_adaptive = model.beta.data.clone()
+                best_density = model.beta_density.data.clone()
+                best_epoch_6 = epoch + 1
+                print(f"  New best MRR!")
+
+        model.beta.data = best_beta_adaptive
+        model.beta_density.data = best_density
+
+        # Final save: full trained state from both stages.
+        save_beta_checkpoint(
+            beta_ckpt_path, model,
+            stage='stage6',
+            seed=args.seed,
+            best_mrr_stage3=best_mrr,
+            epoch_best_stage3=best_epoch_3,
+            best_mrr_stage6=best_mrr_adaptive,
+            epoch_best_stage6=best_epoch_6,
+            base_checkpoint=os.path.abspath(args.checkpoint),
+        )
+
     print(f"\n[7] Testing with TRAINED adaptive beta...")
-    metrics_adaptive_after, ranks_adaptive, _ = evaluate(
+    metrics_adaptive_after, pq_adaptive = evaluate(
         model, test_dataloader, device, adaptive_beta=True, return_per_query=True,
     )
     print_results("Adaptive Beta (trained)", metrics_adaptive_after)
@@ -599,18 +1009,57 @@ def main():
     else:
         print("Interpretation: Grounding density has no effect")
 
-    # === Per-bucket analysis ===
-    # Slice the test set by grounding density (the same feature the model uses
-    # for adaptive mixing) and report MRR per bucket per method. This is what
-    # answers "do rules help more on dense queries?" and reveals which density
-    # regime, if any, benefits from adaptive beta on WN18RR.
+    # === Post-eval analyses ===
+    # All four reports run on the per-query data captured at steps [1], [4], [7].
+    # They are pure CPU bookkeeping; no extra GPU memory beyond what evaluate()
+    # already consumed. Method-invariant fields (densities, relations,
+    # true_tails, corr) are read from pq_fixed.
+    fixed_label = f"Fixed α={args.alpha}"
+    method_to_ranks = {
+        fixed_label: pq_fixed['ranks'],
+        "Rel-Beta":  pq_beta['ranks'],
+        "Adaptive":  pq_adaptive['ranks'],
+    }
+    method_to_top1 = {
+        fixed_label: pq_fixed['top1'],
+        "Rel-Beta":  pq_beta['top1'],
+        "Adaptive":  pq_adaptive['top1'],
+    }
+
+    # 1. Per-bucket MRR / Hit@1 / Hit@10 / MR by density quintile.
     print_bucket_analysis(
-        method_to_ranks={
-            f"Fixed α={args.alpha}": ranks_fixed,
-            "Rel-Beta": ranks_beta,
-            "Adaptive": ranks_adaptive,
-        },
-        densities=test_densities,
+        method_to_ranks=method_to_ranks,
+        densities=pq_fixed['densities'],
+        num_buckets=5,
+    )
+
+    # 2. Per-relation breakdown linking learned beta[r] to per-relation MRR.
+    print_per_relation_table(
+        method_to_ranks=method_to_ranks,
+        relations=pq_fixed['relations'],
+        model=model,
+        densities=pq_fixed['densities'],
+        fixed_method_name=fixed_label,
+        adaptive_method_name="Adaptive",
+    )
+
+    # 3. Decision-flip analysis: do Adaptive / Rel-Beta predict different
+    #    top-1 entities than Fixed-alpha, and are the flips productive?
+    #    relations=... and model=... enable a per-relation breakdown that
+    #    can be cross-referenced with the PER-RELATION TABLE above.
+    print_decision_flip_analysis(
+        method_to_top1=method_to_top1,
+        true_tails=pq_fixed['true_tails'],
+        pairs=[(fixed_label, "Adaptive"), ("Rel-Beta", "Adaptive")],
+        relations=pq_fixed['relations'],
+        model=model,
+    )
+
+    # 4. Headroom diagnostic: how correlated are rule and KGE rankings?
+    #    Upper-bounds what *any* mixing strategy could possibly achieve.
+    print_headroom_diagnostic(
+        corrs=pq_fixed['corr'],
+        densities=pq_fixed['densities'],
         num_buckets=5,
     )
 
