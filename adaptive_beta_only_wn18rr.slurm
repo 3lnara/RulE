@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=adaptive_beta_only_wn18rr
+#SBATCH --job-name=adaptive_beta_only_wn18rr_densnorm_perrel
 #SBATCH --partition=mcs.gpu.q
 #SBATCH --constraint=v100
 #SBATCH --time=07:00:00
@@ -46,12 +46,13 @@ echo ""
 ORIG_OUTPUT="$HOME/RulE/outputs/wn18rr_original"
 PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
 GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
+BETA_CHECKPOINT="${ORIG_OUTPUT}/beta.pt"
 
 # Config file — same one used for the original run
 CONFIG="$HOME/RulE/config/wn18rr_hpc.json"
 
 # Output directory for this adaptive-beta run
-SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_wn18rr"
+SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_wn18rr_densnorm_perrel"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
 # Adaptive-beta hyper-parameters
@@ -104,6 +105,11 @@ python3 -u "$HOME/RulE/scripts/train_beta_grounding_chunked.py" \
     --lr      "${BETA_LR}" \
     --density_lr "${BETA_DENSITY_LR}" \
     --alpha   "${FIXED_ALPHA}" \
+    --normalize_scores \
+    --standardize_feature \
+    --feature density \
+    --seed 42 \
+    --beta_checkpoint "${BETA_CHECKPOINT}" \
     2>&1 | tee "${SAVE_PATH}/beta_training.log"
 
 TRAIN_RC=${PIPESTATUS[0]}

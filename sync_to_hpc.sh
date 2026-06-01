@@ -163,7 +163,10 @@ run_rsync "${DEST_BASE}/slurm/" \
 run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/adaptive_beta_only.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr.slurm" \
+  "${SCRIPT_DIR}/adaptive_beta_only_wn18rr_numnorm_rel.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls.slurm" \
+  "${SCRIPT_DIR}/adaptive_beta_only_umls_densunnorm.slurm" \
+  "${SCRIPT_DIR}/adaptive_beta_only_umls_densnorm.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only_umls.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only.slurm" \
   "${SCRIPT_DIR}/rule_comparison_gpu.slurm" \

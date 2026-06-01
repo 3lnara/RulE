@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=adaptive_beta_only_umls_noperrel
+#SBATCH --job-name=adaptive_beta_only_wn18rr_numnorm_perrel
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=00:30:00
+#SBATCH --constraint=v100
+#SBATCH --time=07:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -42,23 +43,23 @@ echo ""
 #   checkpoint    — best pre-trained KGE + rule embeddings (from PreTrainer)
 #   grounding.pt  — best MLP grounding weights (from GroundTrainer)
 # Both are produced by rule_comparison_gpu.slurm (or a standalone original run).
-ORIG_OUTPUT="$HOME/RulE/outputs/umls"
+ORIG_OUTPUT="$HOME/RulE/outputs/wn18rr_original"
 PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
 GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 BETA_CHECKPOINT="${ORIG_OUTPUT}/beta.pt"
 
 # Config file — same one used for the original run
-CONFIG="$HOME/RulE/config/umls_hpc.json"
+CONFIG="$HOME/RulE/config/wn18rr_hpc.json"
 
 # Output directory for this adaptive-beta run
-SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_umls_numnorm_noperrel"
+SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_wn18rr_numnorm_perrel"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
 # Adaptive-beta hyper-parameters
 BETA_EPOCHS=10
 BETA_LR=0.01
-BETA_DENSITY_LR=0.01
-FIXED_ALPHA=2.0   # baseline alpha for comparison table
+BETA_DENSITY_LR=0.001
+FIXED_ALPHA=1.0   # baseline alpha for comparison table
 
 echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
@@ -97,19 +98,18 @@ echo ""
 TRAIN_START=$(date +%s)
 
 cd "$HOME/RulE/RulE_original/src"
-python3 -u "$HOME/RulE/scripts/train_beta_grounding.py" \
+python3 -u "$HOME/RulE/scripts/train_beta_grounding_chunked.py" \
     --config  "${CONFIG}" \
     --checkpoint "${GROUNDING_CHECKPOINT}" \
     --epochs  "${BETA_EPOCHS}" \
     --lr      "${BETA_LR}" \
     --density_lr "${BETA_DENSITY_LR}" \
     --alpha   "${FIXED_ALPHA}" \
-    --seed 42 \
-    --beta_checkpoint "${BETA_CHECKPOINT}" \
-    --feature num_rules \
     --normalize_scores \
     --standardize_feature \
-    --no_per_relation \
+    --feature num_rules \
+    --seed 42 \
+    --beta_checkpoint "${BETA_CHECKPOINT}" \
     2>&1 | tee "${SAVE_PATH}/beta_training.log"
 
 TRAIN_RC=${PIPESTATUS[0]}

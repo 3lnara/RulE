@@ -26,6 +26,29 @@ def parse_args():
     parser.add_argument('--density_lr', type=float, default=0.01)
     parser.add_argument('--alpha', type=float, default=3.0,
                        help='Fixed alpha for comparison baseline')
+    # Adaptive-beta feature + score scaling -----------------------------------
+    parser.add_argument('--feature', type=str, default='density',
+                       choices=['density', 'num_rules'],
+                       help="Per-query feature the adaptive head conditions on. "
+                            "'density': fraction of candidate entities with >=1 "
+                            "rule fired. 'num_rules': fraction of the relation's "
+                            "rules that fired for the (h, r) query.")
+    parser.add_argument('--normalize_scores', action='store_true',
+                       help='Per-query (over entities) divide rule_logits and '
+                            'kge_score by their std before mixing, so the convex '
+                            'combination beta*rule+(1-beta)*kge is on a common '
+                            'scale (beta=0.5 ~ balanced). Applied to ALL methods '
+                            'uniformly (fixed-alpha, per-relation, adaptive).')
+    parser.add_argument('--standardize_feature', action='store_true',
+                       help='Z-score the adaptive feature using mean/std computed '
+                            'once on the beta-training split, so beta[r] is the '
+                            'log-odds at the average query and beta_density is '
+                            'well-conditioned.')
+    parser.add_argument('--no_per_relation', action='store_true',
+                       help='Ablation: replace per-relation intercept beta[r] with a '
+                            'single global scalar (global_beta). Stage 3 then trains '
+                            'global_beta; stage 6 trains beta_density on top. Isolates '
+                            'whether per-relation calibration is needed.')
     # Reproducibility / persistence ------------------------------------------
     parser.add_argument('--seed', type=int, default=42,
                        help='Global RNG seed (torch / random / cuda) and seed '
@@ -45,14 +68,19 @@ def parse_args():
 
 
 def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alpha=3.0,
-             return_per_query=False):
+             return_per_query=False, normalize_scores=False, extra_ranks=False):
     """Evaluate the model.
+
+    If `normalize_scores` is True, rule_logits and kge_score are each divided by
+    their per-query std (over the entity axis) before mixing, so the convex
+    combination is on a common scale. Rank-based quantities (corr, extra ranks)
+    are computed BEFORE normalization since per-query scaling is order-preserving.
 
     If `return_per_query` is True, returns (metrics, per_query_dict). The dict
     keys mirror what the post-eval analyses need:
       - 'ranks'      : Tensor[N]  filtered, tie-averaged rank per query.
-      - 'densities'  : Tensor[N]  rule grounding density per query (same signal
-                                  that compute_adaptive_beta conditions on).
+      - 'feature'    : Tensor[N]  raw adaptive feature per query (the signal
+                                  compute_adaptive_beta conditions on).
       - 'relations'  : Tensor[N]  relation id per query (long).
       - 'top1'       : Tensor[N]  predicted entity id (argmax over flag-True
                                   candidates) under THIS method's mixed score.
@@ -63,6 +91,9 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
                                   pre-mix rule_score and the kge_score over all
                                   candidate entities. Method-invariant for the
                                   same reason as 'true_tails'.
+    If `extra_ranks` is True it additionally returns:
+      - 'rank_rule'  : Tensor[N]  true-tail rank under rule-only scores (beta=1).
+      - 'rank_kge'   : Tensor[N]  true-tail rank under kge-only scores (beta=0).
     All tensors are on CPU and aligned by index.
     """
     model.eval()
@@ -73,8 +104,10 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
     concat_all_t = []
     concat_flag = []
     concat_mask = []
-    concat_density = [] if return_per_query else None
+    concat_feature = [] if return_per_query else None
     concat_corr = [] if return_per_query else None
+    all_rank_rule = [] if extra_ranks else None
+    all_rank_kge  = [] if extra_ranks else None
 
     with torch.no_grad():
         for batch in dataloader:
@@ -87,16 +120,11 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             # Forward pass: raw rule scores (with bias added, see model.forward)
             rule_logits, mask = model(all_h, all_r, None)
 
-            # Per-query rule-grounding density: fraction of candidate entities
-            # for which at least one rule fired. Read from the model's stash
-            # populated by forward() -- this is the *same* signal that
-            # compute_adaptive_beta uses, so the bucket edges line up with the
-            # feature the adaptive head conditions on. NOTE: computing density
-            # from rule_logits.min() / eps was wrong -- self.bias variance
-            # collapsed it to ~1 for every query (see compute_adaptive_beta).
+            # Per-query adaptive feature (density or num_rules): read from the
+            # model's stash via get_query_feature() -- the *same* signal that
+            # compute_adaptive_beta conditions on, so bucket edges line up.
             if return_per_query:
-                density = model._last_ground_mask.float().mean(dim=-1)  # [batch]
-                concat_density.append(density.detach())
+                concat_feature.append(model.get_query_feature().detach())
 
             kge_score = model.compute_g_KGE(all_h, all_r)
 
@@ -123,11 +151,28 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
                 concat_corr.append((num / denom).detach().cpu())
                 del ra, rb, a_c, b_c, num, denom
 
+            # Rule-only / KGE-only true-tail ranks for the feature-validity
+            # diagnostic. Computed per query BEFORE normalization (per-query
+            # scaling is order-preserving so it cannot change a rank).
+            if extra_ranks:
+                for k in range(all_t.size(0)):
+                    t = all_t[k]
+                    all_rank_rule.append(_filtered_rank(rule_logits[k], flag[k], mask[k], t))
+                    all_rank_kge.append(_filtered_rank(kge_score[k], flag[k], mask[k], t))
+
+            # Optional per-query score normalization (common scale before mix).
+            if normalize_scores:
+                rule_logits = rule_logits / (rule_logits.std(dim=-1, keepdim=True) + 1e-6)
+                kge_score   = kge_score   / (kge_score.std(dim=-1, keepdim=True) + 1e-6)
+
             if adaptive_beta:
                 beta, _ = model.compute_adaptive_beta(rule_logits, all_r)
                 logits = beta * rule_logits + (1 - beta) * kge_score
             elif use_beta:
-                beta = torch.sigmoid(model.beta[all_r[0]]).unsqueeze(-1)
+                if model.use_per_relation:
+                    beta = torch.sigmoid(model.beta[all_r[0]]).unsqueeze(-1)
+                else:
+                    beta = torch.sigmoid(model.global_beta).unsqueeze(-1)
                 logits = beta * rule_logits + (1 - beta) * kge_score
             else:
                 # Use fixed alpha
@@ -181,18 +226,23 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
     }
 
     if return_per_query:
-        return metrics, {
+        pq = {
             'ranks':      ranks,
-            'densities':  torch.cat(concat_density, dim=0).cpu(),
+            'feature':    torch.cat(concat_feature, dim=0).cpu(),
             'relations':  concat_all_r.detach().cpu().long(),
             'top1':       torch.tensor(top1, dtype=torch.long),
             'true_tails': concat_all_t.detach().cpu().long(),
             'corr':       torch.cat(concat_corr, dim=0).cpu(),
         }
+        if extra_ranks:
+            pq['rank_rule'] = torch.tensor(all_rank_rule, dtype=torch.float)
+            pq['rank_kge'] = torch.tensor(all_rank_kge, dtype=torch.float)
+        return metrics, pq
     return metrics
 
 
-def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
+def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
+                     normalize_scores=False):
     """Train beta (and beta_density if adaptive) for one epoch."""
     model.train()
 
@@ -203,7 +253,11 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
     # optimizer only owned `beta_density`, but the grad was wastefully computed.
     for name, param in model.named_parameters():
         if name == 'beta':
-            param.requires_grad = (not adaptive)
+            # Trains in stage 3 only when use_per_relation=True.
+            param.requires_grad = (not adaptive) and model.use_per_relation
+        elif name == 'global_beta':
+            # Trains in stage 3 only when use_per_relation=False.
+            param.requires_grad = (not adaptive) and (not model.use_per_relation)
         elif name == 'beta_density':
             param.requires_grad = adaptive
         else:
@@ -224,11 +278,19 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False):
         with torch.no_grad():
             rule_logits, mask = model(all_h, all_r, None)
             kge_score = model.compute_g_KGE(all_h, all_r)
+            # Per-query score normalization (same transform as evaluate). The
+            # adaptive feature is read from the model stash, not these tensors,
+            # so normalizing here does not touch the feature.
+            if normalize_scores:
+                rule_logits = rule_logits / (rule_logits.std(dim=-1, keepdim=True) + 1e-6)
+                kge_score   = kge_score   / (kge_score.std(dim=-1, keepdim=True) + 1e-6)
         
         if adaptive:
             beta, _ = model.compute_adaptive_beta(rule_logits, all_r)
-        else:
+        elif model.use_per_relation:
             beta = torch.sigmoid(model.beta[all_r[0]]).unsqueeze(-1)
+        else:
+            beta = torch.sigmoid(model.global_beta).unsqueeze(-1)
         logits = beta * rule_logits + (1 - beta) * kge_score
         
         # Compute loss: we want to maximize score for true tails
@@ -273,8 +335,52 @@ def print_results(name, metrics):
         print(f"  {k}: {v:.4f}")
 
 
+def _filtered_rank(scores_row, flag_row, mask_row, t):
+    """Tie-averaged, filtered rank of true tail t under a 1-D score vector.
+
+    Mirrors the inline rank logic used for the mixed logits, factored out so the
+    rule-only / KGE-only ranks (feature-validity diagnostic) use the same rule.
+    Works on CPU or GPU tensors.
+    """
+    if mask_row[t].item():
+        val = scores_row[t]
+        L = (scores_row[flag_row] > val).sum().item() + 1
+        H = (scores_row[flag_row] >= val).sum().item() + 2
+    else:
+        L = 1
+        H = flag_row.numel() + 1
+    return (L + H - 1) / 2.0
+
+
+def compute_feature_stats(model, dataloader, device):
+    """Compute mean/std of the model's adaptive feature on the given split.
+
+    One forward pass over `dataloader` (no grad), collecting model.get_query_feature()
+    per query, then store mean/std into model.feature_mean / model.feature_std so
+    compute_adaptive_beta can z-score the feature. Run on the beta-TRAIN split
+    only -- never on test -- so standardization does not peek at evaluation data.
+    """
+    model.eval()
+    feats = []
+    with torch.no_grad():
+        for batch in dataloader:
+            all_h, all_r, all_t, flag = batch
+            all_h = all_h.squeeze(0).to(device)
+            all_r = all_r.squeeze(0).to(device)
+            model(all_h, all_r, None)
+            feats.append(model.get_query_feature().detach().cpu())
+    feats = torch.cat(feats, dim=0).float()
+    mean = feats.mean()
+    std = feats.std().clamp_min(1e-6)
+    model.feature_mean.data = mean.view(1).to(model.feature_mean.device)
+    model.feature_std.data = std.view(1).to(model.feature_std.device)
+    print(f"Feature '{model.feature_name}' stats (beta-train split): "
+          f"mean={mean.item():.4f}  std={std.item():.4f}  "
+          f"(n={feats.numel()})")
+
+
 def print_bucket_analysis(method_to_ranks, densities, num_buckets=5,
-                          title="PER-BUCKET ANALYSIS (test set, bucketed by rule grounding density)"):
+                          feature_name='density', title=None):
     """Print per-bucket MRR / Hit@1 / Hit@10 / MR across combination methods.
 
     Layout is one row per (bucket, method): for each density bucket we emit
@@ -290,6 +396,8 @@ def print_bucket_analysis(method_to_ranks, densities, num_buckets=5,
         num_buckets:     int                  - quantile buckets for nonzero densities.
                          A separate "zero" bucket is reported if any density ~= 0.
     """
+    if title is None:
+        title = f"PER-BUCKET ANALYSIS (test set, bucketed by feature='{feature_name}')"
     print(f"\n{'='*80}")
     print(title)
     print(f"{'='*80}")
@@ -359,7 +467,7 @@ def print_bucket_analysis(method_to_ranks, densities, num_buckets=5,
             label = f"Q{b+1} [{lo:.4f}, {hi:.4f}]"
             _row_block(label, bucket_mask)
 
-    print(f"\n  Total queries: {n_total}   Density range: [{d.min().item():.4f}, {d.max().item():.4f}]")
+    print(f"\n  Total queries: {n_total}   {feature_name} range: [{d.min().item():.4f}, {d.max().item():.4f}]")
 
 
 def print_per_relation_table(method_to_ranks, relations, model, densities,
@@ -421,7 +529,7 @@ def print_per_relation_table(method_to_ranks, relations, model, densities,
 
     method_header = "  ".join(f"{m:>11}" for m in method_names)
     header = (
-        f"{'r':>4}  {'n':>6}  {'beta[r]':>9}  {'dens_mean':>10}  "
+        f"{'r':>4}  {'n':>6}  {'beta[r]':>9}  {'feat_mean':>10}  "
         f"{method_header}  {'dMRR(A-F)':>11}"
     )
     print(header)
@@ -435,126 +543,80 @@ def print_per_relation_table(method_to_ranks, relations, model, densities,
         )
 
 
-def print_decision_flip_analysis(method_to_top1, true_tails, pairs,
-                                 relations=None, model=None):
-    """Decision-flip stats for each (method_A, method_B) pair.
+def print_feature_validity(feature, rank_rule, rank_kge, feature_name='density',
+                           num_buckets=5):
+    """Does the per-query feature predict when rules beat KGE?
 
-    Global block, for every pair, reports:
-      flips                queries where top-1(A) != top-1(B).
-      A_correct_only       flips where A predicted the true tail and B did not.
-      B_correct_only       flips where B predicted the true tail and A did not.
-      neither_correct      flips where both top-1 predictions are wrong.
-      Hit@1 delta          (B_correct_only - A_correct_only) / N -- exactly the
-                           Hit@1 delta from B over A contributed by these flips.
-
-    Per-relation block (printed only when both `relations` and `model` are
-    given): for each relation that has at least one flip, prints n, beta[r],
-    flips, A_only, B_only, neither, and the *local* Hit@1 delta within that
-    relation. Sorted by |local Hit@1 delta| descending so the relations where
-    the choice of method matters most for accuracy come first.
+    For each query we compare the true-tail reciprocal rank under rule-only
+    (beta=1) vs KGE-only (beta=0):
+        rule_advantage = RR_rule - RR_kge   (> 0  => rules rank truth higher).
+    A positive correlation between the feature and rule_advantage means the
+    feature is a *valid router*: high feature => rules are the better branch =>
+    "trust rules more when the feature is high" is justified. This replaces the
+    decision-flip table, which only said whether predictions changed, not
+    whether the feature explains where rules should be trusted.
 
     Args:
-        method_to_top1: dict[str, Tensor[N]] of per-query top-1 entity ids.
-        true_tails:     Tensor[N] of ground-truth tail ids.
-        pairs:          list of (name_A, name_B). Report framed as "B over A".
-        relations:      optional Tensor[N] of per-query relation ids; enables
-                        the per-relation breakdown.
-        model:          optional RulE model; if given alongside relations, the
-                        per-relation breakdown will include sigmoid(model.beta[r])
-                        so the table can be cross-referenced with the
-                        per-relation MRR table.
+        feature:   Tensor[N] raw per-query feature (density or num_rules).
+        rank_rule: Tensor[N] true-tail rank under rule-only scores.
+        rank_kge:  Tensor[N] true-tail rank under kge-only scores.
     """
     print(f"\n{'='*80}")
-    print("DECISION-FLIP ANALYSIS")
+    print(f"FEATURE-VALIDITY DIAGNOSTIC (feature='{feature_name}')")
     print(f"{'='*80}")
-    n = true_tails.numel()
-    print(f"Total test queries: {n}\n")
 
-    rels_cpu = relations.cpu().long() if relations is not None else None
-    beta_sigmoid = None
-    if model is not None:
-        with torch.no_grad():
-            beta_sigmoid = torch.sigmoid(model.beta).detach().cpu()
+    f = feature.detach().cpu().float()
+    rr = 1.0 / rank_rule.detach().cpu().float()
+    rk = 1.0 / rank_kge.detach().cpu().float()
+    adv = rr - rk
 
-    for (a_name, b_name) in pairs:
-        a_top1 = method_to_top1[a_name]
-        b_top1 = method_to_top1[b_name]
+    fc = f - f.mean()
+    ac = adv - adv.mean()
+    denom = torch.sqrt((fc ** 2).sum() * (ac ** 2).sum()).clamp_min(1e-12)
+    pearson = (fc * ac).sum() / denom
 
-        flip_mask = (a_top1 != b_top1)
-        n_flips = int(flip_mask.sum().item())
-        if n_flips == 0:
-            print(f"  {b_name} vs {a_name}: 0 flips (identical top-1 predictions)\n")
-            continue
+    print(f"  Pearson corr(feature, rule_advantage): {pearson.item():+.4f}")
+    print(f"  Mean rule_advantage (RR_rule - RR_kge): {adv.mean().item():+.4f}")
+    print(f"  Frac queries rules strictly better:     {(adv > 0).float().mean().item():.4f}")
+    print(f"  RR_rule mean: {rr.mean().item():.4f}   RR_kge mean: {rk.mean().item():.4f}\n")
 
-        a_correct = (a_top1 == true_tails)
-        b_correct = (b_top1 == true_tails)
+    print(f"  Per-{feature_name}-bucket rule advantage:")
+    bh = (f"  {'Bucket':<26} {'n':>6}  {'mean feat':>10}  "
+          f"{'RR_rule':>9}  {'RR_kge':>9}  {'adv':>9}  {'rules>kge':>9}")
+    print(bh)
+    print("  " + "-" * (len(bh) - 2))
 
-        a_only = int((flip_mask & a_correct & ~b_correct).sum().item())
-        b_only = int((flip_mask & b_correct & ~a_correct).sum().item())
-        neither = int((flip_mask & ~a_correct & ~b_correct).sum().item())
-        # both_correct is impossible because the top-1s differ.
+    def _bucket_row(label, mask):
+        nn_ = int(mask.sum().item())
+        if nn_ == 0:
+            return
+        print(f"  {label:<26} {nn_:>6}  {f[mask].mean().item():>10.4f}  "
+              f"{rr[mask].mean().item():>9.4f}  {rk[mask].mean().item():>9.4f}  "
+              f"{adv[mask].mean().item():>+9.4f}  {(adv[mask] > 0).float().mean().item():>9.4f}")
 
-        flip_rate = n_flips / n
-        hit1_delta = (b_only - a_only) / n
+    zero_mask = f <= 1e-9
+    nonzero_mask = ~zero_mask
+    if zero_mask.any():
+        _bucket_row("zero (no rule signal)", zero_mask)
+    if nonzero_mask.any():
+        f_nz = f[nonzero_mask]
+        probs = torch.linspace(0.0, 1.0, num_buckets + 1)
+        cuts = torch.quantile(f_nz, probs).tolist()
+        for b in range(num_buckets):
+            lo, hi = cuts[b], cuts[b + 1]
+            if b < num_buckets - 1:
+                bm = nonzero_mask & (f >= lo) & (f < hi)
+            else:
+                bm = nonzero_mask & (f >= lo) & (f <= hi)
+            _bucket_row(f"Q{b+1} [{lo:.4f}, {hi:.4f}]", bm)
 
-        print(f"  {b_name} vs {a_name}:")
-        print(f"    flips:                   {n_flips:>6} ({flip_rate*100:5.2f}% of queries)")
-        print(f"    {a_name} correct only:   {a_only:>6}")
-        print(f"    {b_name} correct only:   {b_only:>6}")
-        print(f"    neither correct:         {neither:>6}")
-        print(f"    Hit@1 delta from flips: {hit1_delta:+.4f}")
-
-        if rels_cpu is not None:
-            rows = []
-            for r in sorted(set(rels_cpu.tolist())):
-                rel_mask = (rels_cpu == r)
-                rel_n = int(rel_mask.sum().item())
-                if rel_n == 0:
-                    continue
-                rel_flip = flip_mask & rel_mask
-                rel_n_flips = int(rel_flip.sum().item())
-                if rel_n_flips == 0:
-                    # Skip relations with no method disagreement -- they
-                    # contribute no information to this section.
-                    continue
-                rel_a_only = int((rel_flip & a_correct & ~b_correct).sum().item())
-                rel_b_only = int((rel_flip & b_correct & ~a_correct).sum().item())
-                rel_neither = int((rel_flip & ~a_correct & ~b_correct).sum().item())
-                # Local Hit@1 delta is normalized by n_in_relation (NOT total N),
-                # so it expresses "how much did B move accuracy on this relation".
-                rel_dh1 = (rel_b_only - rel_a_only) / rel_n
-                beta_r = (
-                    beta_sigmoid[r].item()
-                    if beta_sigmoid is not None and r < beta_sigmoid.numel()
-                    else float('nan')
-                )
-                rows.append({
-                    'r': r, 'n': rel_n, 'beta': beta_r,
-                    'flips': rel_n_flips,
-                    'a_only': rel_a_only, 'b_only': rel_b_only, 'neither': rel_neither,
-                    'dh1': rel_dh1,
-                })
-            rows.sort(key=lambda x: abs(x['dh1']), reverse=True)
-            if rows:
-                print()
-                print(f"    Per-relation (relations with >=1 flip; sorted by |local dHit@1| desc):")
-                hdr = (
-                    f"      {'r':>4}  {'n':>6}  {'beta[r]':>9}  "
-                    f"{'flips':>6}  {'A_only':>6}  {'B_only':>6}  {'neither':>7}  "
-                    f"{'dHit@1':>9}"
-                )
-                print(hdr)
-                print("      " + "-" * (len(hdr) - 6))
-                for row in rows:
-                    print(
-                        f"      {row['r']:>4}  {row['n']:>6}  {row['beta']:>9.4f}  "
-                        f"{row['flips']:>6}  {row['a_only']:>6}  {row['b_only']:>6}  "
-                        f"{row['neither']:>7}  {row['dh1']:>+9.4f}"
-                    )
-        print()
+    print()
+    print("  Reading: corr > 0 => higher feature picks out queries where rules")
+    print("           outrank KGE, so 'trust rules more when feature is high' is justified.")
+    print("           corr ~ 0 => feature does not identify where rules help (weak router).")
 
 
-def print_headroom_diagnostic(corrs, densities, num_buckets=5):
+def print_headroom_diagnostic(corrs, densities, num_buckets=5, feature_name='density'):
     """Mean Spearman correlation between rule and KGE rankings, plus per-bucket means.
 
     Interpretation: if the rule and KGE rank candidates near-identically (corr ~ 1),
@@ -585,7 +647,7 @@ def print_headroom_diagnostic(corrs, densities, num_buckets=5):
     print(f"  Std:                {cv.std().item():.4f}")
     print(f"  Min/Max:            [{cv.min().item():+.4f}, {cv.max().item():+.4f}]\n")
 
-    print(f"  Per-density-bucket mean correlation:")
+    print(f"  Per-{feature_name}-bucket mean correlation:")
     bh = f"  {'Bucket':<26} {'n':>6}  {'mean corr':>11}"
     print(bh)
     print("  " + "-" * (len(bh) - 2))
@@ -625,20 +687,27 @@ def print_headroom_diagnostic(corrs, densities, num_buckets=5):
 def print_beta_stats(model):
     """Print statistics about learned beta values."""
     with torch.no_grad():
-        beta_values = torch.sigmoid(model.beta).cpu().numpy()
-        print(f"\nBeta Statistics (per-relation weight for rule score):")
-        print(f"  Mean:   {beta_values.mean():.4f}")
-        print(f"  Std:    {beta_values.std():.4f}")
-        print(f"  Min:    {beta_values.min():.4f}")
-        print(f"  Max:    {beta_values.max():.4f}")
-        print(f"  Median: {float(torch.median(torch.tensor(beta_values))):.4f}")
-        print(f"  Density weight (beta_density): {model.beta_density.item():.4f}")
-        if model.beta_density.item() > 0:
-            print(f"    -> Positive: denser groundings push beta UP (trust rules more)")
-        elif model.beta_density.item() < 0:
-            print(f"    -> Negative: denser groundings push beta DOWN (trust KGE more)")
+        if model.use_per_relation:
+            beta_values = torch.sigmoid(model.beta).cpu().numpy()
+            print(f"\nBeta Statistics (per-relation intercept):")
+            print(f"  Mean:   {beta_values.mean():.4f}")
+            print(f"  Std:    {beta_values.std():.4f}")
+            print(f"  Min:    {beta_values.min():.4f}")
+            print(f"  Max:    {beta_values.max():.4f}")
+            print(f"  Median: {float(torch.median(torch.tensor(beta_values))):.4f}")
         else:
-            print(f"    -> Zero: grounding density has no effect (pure per-relation beta)")
+            print(f"\nBeta Statistics (global intercept, no per-relation):")
+            print(f"  global_beta (logit): {model.global_beta.item():.4f}")
+            print(f"  global_beta (prob):  {torch.sigmoid(model.global_beta).item():.4f}")
+        bd = model.beta_density.item()
+        fn = model.feature_name
+        print(f"  Feature slope (beta_density): {bd:.4f}  (feature='{fn}')")
+        if bd > 0:
+            print(f"    -> Positive: higher {fn} pushes beta UP (trust rules more)")
+        elif bd < 0:
+            print(f"    -> Negative: higher {fn} pushes beta DOWN (trust KGE more)")
+        else:
+            print(f"    -> Zero: {fn} has no effect on mixing")
 
 
 def save_beta_checkpoint(path, model, **meta):
@@ -655,8 +724,10 @@ def save_beta_checkpoint(path, model, **meta):
     preserved if a job is interrupted.
     """
     state = {
-        'beta':         model.beta.data.detach().cpu().clone(),
-        'beta_density': model.beta_density.data.detach().cpu().clone(),
+        'beta':             model.beta.data.detach().cpu().clone(),
+        'beta_density':     model.beta_density.data.detach().cpu().clone(),
+        'global_beta':      model.global_beta.data.detach().cpu().clone(),
+        'use_per_relation': model.use_per_relation,
         **meta,
     }
     parent = os.path.dirname(path)
@@ -749,6 +820,10 @@ def main():
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     print(f"Seed: {args.seed}")
+    print(f"Adaptive feature: {args.feature}")
+    print(f"Normalize rule/KGE scores: {args.normalize_scores}")
+    print(f"Standardize feature: {args.standardize_feature}")
+    print(f"Use per-relation intercept: {not args.no_per_relation}")
     
     # Load config
     config = load_config(args.config)
@@ -775,7 +850,9 @@ def main():
         gamma_rule=config.gamma_rule,
         hidden_dim=config.hidden_dim,
         device=device,
-        dataset=config.data_path
+        dataset=config.data_path,
+        feature_name=args.feature,
+        use_per_relation=not args.no_per_relation,
     )
     
     # Load rules
@@ -841,7 +918,14 @@ def main():
 
     test_set = TestDataset(graph, batch_size)
     test_dataloader = DataLoader(test_set, batch_size=1, num_workers=0)
-    
+
+    # Feature standardization: compute mean/std of the adaptive feature on the
+    # beta-TRAIN split only (never test), so compute_adaptive_beta can z-score it.
+    # When skipping training the stats are restored from the beta checkpoint below.
+    model.standardize_feature = args.standardize_feature
+    if args.standardize_feature and not args.skip_beta_training:
+        compute_feature_stats(model, valid_train_loader, device)
+
     print(f"\n{'='*60}")
     print("BETA TRAINING DURING GROUNDING PHASE")
     print(f"{'='*60}")
@@ -849,13 +933,15 @@ def main():
     # === Baseline: Fixed Alpha ===
     # Capture per-query data here (and at the two later test evals) so we can
     # run the post-eval analyses at the end. The dict contains:
-    #   ranks, densities, relations, top1, true_tails, corr.
-    # Of these, densities/relations/true_tails/corr are method-invariant -- we
-    # read them off the Fixed-alpha call only. top1 and ranks are method-specific.
+    #   ranks, feature, relations, top1, true_tails, corr (+ rank_rule/rank_kge).
+    # Of these, feature/relations/true_tails/corr (+ extra ranks) are method-
+    # invariant -- we read them off the Fixed-alpha call only. top1 and ranks
+    # are method-specific.
     print(f"\n[1] Testing with FIXED ALPHA = {args.alpha} (baseline)...")
     metrics_fixed, pq_fixed = evaluate(
         model, test_dataloader, device, use_beta=False, alpha=args.alpha,
-        return_per_query=True,
+        return_per_query=True, normalize_scores=args.normalize_scores,
+        extra_ranks=True,
     )
     print_results(f"Fixed Alpha (alpha={args.alpha})", metrics_fixed)
     
@@ -868,6 +954,13 @@ def main():
         beta_state = torch.load(beta_ckpt_path, map_location=device)
         model.beta.data.copy_(beta_state['beta'].to(device))
         model.beta_density.data.copy_(beta_state['beta_density'].to(device))
+        if 'global_beta' in beta_state:
+            model.global_beta.data.copy_(beta_state['global_beta'].to(device))
+        # Restore feature-standardization stats so adaptive beta matches training.
+        if 'feature_mean' in beta_state:
+            model.feature_mean.data = beta_state['feature_mean'].to(device)
+            model.feature_std.data = beta_state['feature_std'].to(device)
+            model.standardize_feature = beta_state.get('standardize_feature', False)
         print(f"\n[2/3] SKIPPED -- loaded trained beta from {beta_ckpt_path}")
         print(f"      seed:           {beta_state.get('seed', 'unknown')}")
         print(f"      stage:          {beta_state.get('stage', 'unknown')}")
@@ -878,27 +971,39 @@ def main():
         best_epoch_3 = beta_state.get('epoch_best_stage3', best_epoch_3)
         print_beta_stats(model)
     else:
-        # === Per-relation Beta before training ===
-        print(f"\n[2] Testing with PER-RELATION BETA (before training)...")
-        metrics_beta_before = evaluate(model, test_dataloader, device, use_beta=True)
-        print_results("Per-relation Beta (untrained)", metrics_beta_before)
+        # === Per-relation / Global Beta before training ===
+        _stage3_label = "Per-relation Beta" if model.use_per_relation else "Global Beta"
+        print(f"\n[2] Testing with {_stage3_label.upper()} (before training)...")
+        metrics_beta_before = evaluate(model, test_dataloader, device, use_beta=True,
+                                       normalize_scores=args.normalize_scores)
+        print_results(f"{_stage3_label} (untrained)", metrics_beta_before)
         print_beta_stats(model)
 
-        # === Train per-relation Beta ===
-        print(f"\n[3] Training per-relation beta for {args.epochs} epochs...")
+        # === Train intercept (per-relation or global) ===
+        print(f"\n[3] Training {_stage3_label.lower()} for {args.epochs} epochs...")
 
-        model.beta.requires_grad = True
+        if model.use_per_relation:
+            model.beta.requires_grad = True
+            model.global_beta.requires_grad = False
+            _intercept_param = model.beta
+        else:
+            model.beta.requires_grad = False
+            model.global_beta.requires_grad = True
+            _intercept_param = model.global_beta
         model.beta_density.requires_grad = False
-        optimizer = torch.optim.Adam([model.beta], lr=args.lr)
+        optimizer = torch.optim.Adam([_intercept_param], lr=args.lr)
 
         best_mrr = 0
         best_beta = model.beta.data.clone()
+        best_global = model.global_beta.data.clone()
         best_epoch_3 = 0
 
         for epoch in range(args.epochs):
-            loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False)
+            loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False,
+                                    normalize_scores=args.normalize_scores)
             model.eval()
-            val_metrics = evaluate(model, valid_select_loader, device, use_beta=True)
+            val_metrics = evaluate(model, valid_select_loader, device, use_beta=True,
+                                   normalize_scores=args.normalize_scores)
 
             print(f"\nEpoch {epoch+1}/{args.epochs}:")
             print(f"  Loss: {loss:.4f}")
@@ -907,10 +1012,12 @@ def main():
             if val_metrics['MRR'] > best_mrr:
                 best_mrr = val_metrics['MRR']
                 best_beta = model.beta.data.clone()
+                best_global = model.global_beta.data.clone()
                 best_epoch_3 = epoch + 1
                 print(f"  New best MRR!")
 
         model.beta.data = best_beta
+        model.global_beta.data = best_global
 
         # Save progress after stage 3. beta_density is still 0 here; it will
         # be overwritten by the post-stage-6 save below.
@@ -921,13 +1028,19 @@ def main():
             best_mrr_stage3=best_mrr,
             epoch_best_stage3=best_epoch_3,
             base_checkpoint=os.path.abspath(args.checkpoint),
+            feature_name=model.feature_name,
+            standardize_feature=model.standardize_feature,
+            feature_mean=model.feature_mean.detach().cpu().clone(),
+            feature_std=model.feature_std.detach().cpu().clone(),
         )
 
-    print(f"\n[4] Testing with TRAINED per-relation beta...")
+    _stage3_label = "Per-relation Beta" if model.use_per_relation else "Global Beta"
+    print(f"\n[4] Testing with TRAINED {_stage3_label.lower()}...")
     metrics_beta_after, pq_beta = evaluate(
         model, test_dataloader, device, use_beta=True, return_per_query=True,
+        normalize_scores=args.normalize_scores,
     )
-    print_results("Per-relation Beta (trained)", metrics_beta_after)
+    print_results(f"{_stage3_label} (trained)", metrics_beta_after)
     print_beta_stats(model)
     
     # === Adaptive Beta ===
@@ -943,39 +1056,49 @@ def main():
         best_epoch_6 = beta_state.get('epoch_best_stage6', best_epoch_6)
     else:
         print(f"\n[5] Testing with ADAPTIVE BETA (before training)...")
-        metrics_adaptive_before = evaluate(model, test_dataloader, device, adaptive_beta=True)
+        metrics_adaptive_before = evaluate(model, test_dataloader, device, adaptive_beta=True,
+                                           normalize_scores=args.normalize_scores)
         print_results("Adaptive Beta (untrained)", metrics_adaptive_before)
 
         # Train adaptive beta (beta_rel + beta_density)
         print(f"\n[6] Training adaptive beta for {args.epochs} epochs...")
 
         model.beta.requires_grad = False
+        model.global_beta.requires_grad = False   # frozen from stage 3
         model.beta_density.requires_grad = True
         optimizer_adaptive = torch.optim.Adam([model.beta_density], lr=args.density_lr)
 
         best_mrr_adaptive = 0
         best_beta_adaptive = model.beta.data.clone()
+        best_global_adaptive = model.global_beta.data.clone()
         best_density = model.beta_density.data.clone()
         best_epoch_6 = 0
 
         for epoch in range(args.epochs):
-            loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True)
+            loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True,
+                                    normalize_scores=args.normalize_scores)
             model.eval()
-            val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True)
+            val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True,
+                                   normalize_scores=args.normalize_scores)
 
             print(f"\nEpoch {epoch+1}/{args.epochs}:")
             print(f"  Loss: {loss:.4f}")
             print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
             print(f"  beta_density = {model.beta_density.item():.4f}")
+            if not model.use_per_relation:
+                print(f"  global_beta  = {model.global_beta.item():.4f}  "
+                      f"(prob: {torch.sigmoid(model.global_beta).item():.4f})")
 
             if val_metrics['MRR'] > best_mrr_adaptive:
                 best_mrr_adaptive = val_metrics['MRR']
                 best_beta_adaptive = model.beta.data.clone()
+                best_global_adaptive = model.global_beta.data.clone()
                 best_density = model.beta_density.data.clone()
                 best_epoch_6 = epoch + 1
                 print(f"  New best MRR!")
 
         model.beta.data = best_beta_adaptive
+        model.global_beta.data = best_global_adaptive
         model.beta_density.data = best_density
 
         # Final save: full trained state from both stages.
@@ -988,11 +1111,16 @@ def main():
             best_mrr_stage6=best_mrr_adaptive,
             epoch_best_stage6=best_epoch_6,
             base_checkpoint=os.path.abspath(args.checkpoint),
+            feature_name=model.feature_name,
+            standardize_feature=model.standardize_feature,
+            feature_mean=model.feature_mean.detach().cpu().clone(),
+            feature_std=model.feature_std.detach().cpu().clone(),
         )
 
     print(f"\n[7] Testing with TRAINED adaptive beta...")
     metrics_adaptive_after, pq_adaptive = evaluate(
         model, test_dataloader, device, adaptive_beta=True, return_per_query=True,
+        normalize_scores=args.normalize_scores,
     )
     print_results("Adaptive Beta (trained)", metrics_adaptive_after)
     print_beta_stats(model)
@@ -1001,45 +1129,44 @@ def main():
     print(f"\n{'='*60}")
     print("SUMMARY COMPARISON")
     print(f"{'='*60}")
-    print(f"{'Metric':<10} {'Fixed alpha':<12} {'Rel-Beta':<12} {'Adaptive':<12}")
-    print("-" * 50)
+    _rl = "Rel-Beta" if model.use_per_relation else "Global-Beta"
+    print(f"{'Metric':<10} {'Fixed alpha':<14} {_rl:<14} {'Adaptive':<12}")
+    print("-" * 54)
     
     for metric in ['Hit@1', 'Hit@3', 'Hit@10', 'MR', 'MRR']:
         fixed = metrics_fixed[metric]
         rel = metrics_beta_after[metric]
         adaptive = metrics_adaptive_after[metric]
-        print(f"{metric:<10} {fixed:<12.4f} {rel:<12.4f} {adaptive:<12.4f}")
+        print(f"{metric:<10} {fixed:<14.4f} {rel:<14.4f} {adaptive:<12.4f}")
     
     print(f"\nbeta_density learned = {model.beta_density.item():.4f}")
+    fn = model.feature_name
     if model.beta_density.item() > 0:
-        print("Interpretation: Dense groundings -> trust rules more (as expected)")
+        print(f"Interpretation: higher {fn} -> trust rules more (as expected)")
     elif model.beta_density.item() < 0:
-        print("Interpretation: Dense groundings -> trust KGE more (counterintuitive)")
+        print(f"Interpretation: higher {fn} -> trust KGE more (counterintuitive)")
     else:
-        print("Interpretation: Grounding density has no effect")
+        print(f"Interpretation: {fn} has no effect on mixing")
 
     # === Post-eval analyses ===
     # All four reports run on the per-query data captured at steps [1], [4], [7].
     # They are pure CPU bookkeeping; no extra GPU memory beyond what evaluate()
-    # already consumed. Method-invariant fields (densities, relations,
-    # true_tails, corr) are read from pq_fixed.
-    fixed_label = f"Fixed α={args.alpha}"
+    # already consumed. Method-invariant fields (feature, relations,
+    # true_tails, corr, rank_rule, rank_kge) are read from pq_fixed.
+    fixed_label  = f"Fixed α={args.alpha}"
+    rel_label    = "Rel-Beta" if model.use_per_relation else "Global-Beta"
     method_to_ranks = {
         fixed_label: pq_fixed['ranks'],
-        "Rel-Beta":  pq_beta['ranks'],
+        rel_label:   pq_beta['ranks'],
         "Adaptive":  pq_adaptive['ranks'],
     }
-    method_to_top1 = {
-        fixed_label: pq_fixed['top1'],
-        "Rel-Beta":  pq_beta['top1'],
-        "Adaptive":  pq_adaptive['top1'],
-    }
 
-    # 1. Per-bucket MRR / Hit@1 / Hit@10 / MR by density quintile.
+    # 1. Per-bucket MRR / Hit@1 / Hit@10 / MR by feature quintile.
     print_bucket_analysis(
         method_to_ranks=method_to_ranks,
-        densities=pq_fixed['densities'],
+        densities=pq_fixed['feature'],
         num_buckets=5,
+        feature_name=model.feature_name,
     )
 
     # 2. Per-relation breakdown linking learned beta[r] to per-relation MRR.
@@ -1047,29 +1174,29 @@ def main():
         method_to_ranks=method_to_ranks,
         relations=pq_fixed['relations'],
         model=model,
-        densities=pq_fixed['densities'],
+        densities=pq_fixed['feature'],
         fixed_method_name=fixed_label,
         adaptive_method_name="Adaptive",
     )
 
-    # 3. Decision-flip analysis: do Adaptive / Rel-Beta predict different
-    #    top-1 entities than Fixed-alpha, and are the flips productive?
-    #    relations=... and model=... enable a per-relation breakdown that
-    #    can be cross-referenced with the PER-RELATION TABLE above.
-    print_decision_flip_analysis(
-        method_to_top1=method_to_top1,
-        true_tails=pq_fixed['true_tails'],
-        pairs=[(fixed_label, "Adaptive"), ("Rel-Beta", "Adaptive")],
-        relations=pq_fixed['relations'],
-        model=model,
+    # 3. Feature-validity: does the per-query feature predict where rules beat
+    #    KGE? Positive corr => 'trust rules more when feature is high' is
+    #    justified. Replaces the decision-flip table.
+    print_feature_validity(
+        feature=pq_fixed['feature'],
+        rank_rule=pq_fixed['rank_rule'],
+        rank_kge=pq_fixed['rank_kge'],
+        feature_name=model.feature_name,
+        num_buckets=5,
     )
 
     # 4. Headroom diagnostic: how correlated are rule and KGE rankings?
     #    Upper-bounds what *any* mixing strategy could possibly achieve.
     print_headroom_diagnostic(
         corrs=pq_fixed['corr'],
-        densities=pq_fixed['densities'],
+        densities=pq_fixed['feature'],
         num_buckets=5,
+        feature_name=model.feature_name,
     )
 
 

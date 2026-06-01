@@ -18,7 +18,8 @@ def _mem(tag):
     logging.info(f"[MEM] {tag:55s} alloc={alloc:.3f}GB  peak={peak:.3f}GB  reserved={reserv:.3f}GB")
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset,
+                 feature_name='density', use_per_relation=True):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -53,15 +54,40 @@ class RulE(torch.nn.Module):
         self.beta = nn.Parameter(torch.zeros(self.num_relations * 2))
         nn.init.constant_(self.beta, 0.0)
 
-        # === Query-adaptive beta: conditions on grounding density ===
-        # beta(h,r) = sigmoid(beta_rel[r] + beta_density * density(h,r))
+        # === Query-adaptive beta: conditions on a per-query feature ===
+        # Full:          beta(h,r) = sigmoid(beta[r]     + beta_density * feature(h,r))
+        # No-per-rel:    beta(h,r) = sigmoid(global_beta + beta_density * feature(h,r))
         self.beta_density = nn.Parameter(torch.zeros(1))
 
-        # Populated by forward(); a boolean [batch, num_entities] tensor
-        # whose True positions are "at least one rule fired here". Used by
-        # compute_adaptive_beta and by the per-bucket analysis to get a
-        # density signal that isn't contaminated by self.bias variance.
+        # Global scalar intercept used when use_per_relation=False.
+        # Replaces beta[r] with a single shared log-odds at the average feature value.
+        self.global_beta = nn.Parameter(torch.zeros(1))
+
+        # Whether to use per-relation intercept (beta[r]) or the global scalar.
+        self.use_per_relation = use_per_relation
+
+        # Which per-query feature the adaptive head conditions on:
+        #   'density'   : fraction of candidate entities with >=1 rule fired.
+        #   'num_rules' : fraction of this relation's rules that fired for the
+        #                 (h, r) query (breadth of rule evidence).
+        self.feature_name = feature_name
+
+        # Optional standardization of the query feature before it enters the
+        # sigmoid. When enabled, feature -> (feature - mean) / (std + eps) using
+        # statistics computed once on the beta-training split. Stored as buffers
+        # so they move with .to(device) and round-trip through state_dict.
+        self.standardize_feature = False
+        self.register_buffer('feature_mean', torch.zeros(1))
+        self.register_buffer('feature_std', torch.ones(1))
+
+        # Populated by forward():
+        #   _last_ground_mask : bool [batch, num_entities], True where >=1 rule
+        #                       fired (the 'density' signal, uncontaminated by
+        #                       self.bias variance).
+        #   _last_num_rules   : float [batch], fraction of the relation's rules
+        #                       that fired for each query (the 'num_rules' signal).
         self._last_ground_mask = None
+        self._last_num_rules = None
 
         self.epsilon = 2.0
 
@@ -374,6 +400,10 @@ class RulE(torch.nn.Module):
 
         _mem(f"forward START  B={all_h.size(0)} r={query_r}")
 
+        num_rules_total = len(self.relation2rules[query_r])
+        # Per-query count of distinct rules that fired (grounded to >=1 entity).
+        rules_fired = torch.zeros(all_h.size(0), device=device)
+
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
         for index, (r_head, r_body) in self.relation2rules[query_r]:
 
@@ -382,11 +412,18 @@ class RulE(torch.nn.Module):
             count = self.graph.grounding(all_h, r_head, r_body, edges_to_remove).float()
             
             mask += count
+            # This rule "fired" for query b iff it grounded to >=1 candidate tail
+            # for head h_b. Reduce over the entity axis -> [batch] bool -> float.
+            rules_fired += (count.sum(dim=-1) > 0).float()
 
             rule_index.append(index)
             rule_count.append(count)
 
         _mem(f"after grounding loop  num_rules={len(rule_index)}")
+
+        # Fraction of this relation's rules that fired per query (in [0, 1]) so a
+        # single shared beta_density slope stays comparable across relations.
+        self._last_num_rules = rules_fired / max(num_rules_total, 1)
 
         if mask.sum().item() == 0:
             # No rule fired for any query in this batch. Stash an all-False
@@ -454,18 +491,42 @@ class RulE(torch.nn.Module):
 
         self.rules_weight_emb = torch.cat(rules_weight_emb)
 
-    def compute_adaptive_beta(self, rule_score, all_r):
-        """
-        Query-adaptive beta combining per-relation bias and grounding density.
+    def get_query_feature(self):
+        """Raw per-query feature [batch] selected by self.feature_name.
 
-        Density here is the *true* fraction of candidate entities for which at
-        least one rule fired -- read from self._last_ground_mask, which
-        forward() populates on every call. The previous implementation derived
-        density from (rule_score - rule_score.min()) > eps, but rule_score
-        already has the learned per-entity bias added in, and the bias variance
-        was large enough (e.g. on UMLS / Family) to push density to ~1 for
-        essentially every query. That collapsed the feature to a constant, so
-        beta_density became a constant offset absorbed by beta[r].
+        'density'   : fraction of candidate entities with >=1 rule fired
+                      (read from _last_ground_mask). The post-bias rule score is
+                      NOT a usable proxy here -- its variance is dominated by
+                      self.bias, which collapsed density to ~1 for every query.
+        'num_rules' : fraction of this relation's rules that fired for the
+                      (h, r) query (read from _last_num_rules) -- a breadth-of-
+                      evidence signal independent of how many tails each rule hit.
+
+        forward() must have populated the relevant stash first.
+        """
+        if self.feature_name == 'num_rules':
+            if self._last_num_rules is None:
+                raise RuntimeError(
+                    "get_query_feature('num_rules') requires forward() first; "
+                    "self._last_num_rules is None."
+                )
+            return self._last_num_rules
+        if self._last_ground_mask is None:
+            raise RuntimeError(
+                "get_query_feature('density') requires forward() first; "
+                "self._last_ground_mask is None."
+            )
+        return self._last_ground_mask.float().mean(dim=-1)   # [batch]
+
+    def compute_adaptive_beta(self, rule_score, all_r):
+        """Query-adaptive beta = sigmoid(beta[r] + beta_density * feature).
+
+        The feature is selected by self.feature_name ('density' or 'num_rules')
+        and read from the stashes populated by forward(). When
+        self.standardize_feature is True the feature is z-scored with
+        feature_mean / feature_std (computed once on the beta-training split) so
+        beta[r] is the log-odds at the *average* query and the slope
+        beta_density is well-conditioned and comparable across relations.
 
         Args:
             rule_score: [batch, num_entities] (kept for API stability, unused).
@@ -473,15 +534,19 @@ class RulE(torch.nn.Module):
 
         Returns:
             beta:    [batch, 1] adaptive beta in (0, 1).
-            density: [batch] grounding density per query (for interpretability).
+            feature: [batch] the RAW (un-standardized) feature per query, for
+                     interpretability / bucketing.
         """
-        if self._last_ground_mask is None:
-            raise RuntimeError(
-                "compute_adaptive_beta requires forward() to have been called "
-                "first in this iteration; self._last_ground_mask is None."
-            )
-        density = self._last_ground_mask.float().mean(dim=-1)   # [batch]
+        raw = self.get_query_feature()                          # [batch]
+        if self.standardize_feature:
+            feat = (raw - self.feature_mean) / (self.feature_std + 1e-6)
+        else:
+            feat = raw
 
-        logit = self.beta[all_r] + self.beta_density * density
+        if self.use_per_relation:
+            intercept = self.beta[all_r]                        # [batch]
+        else:
+            intercept = self.global_beta.expand(all_r.shape[0])  # [batch], same scalar
+        logit = intercept + self.beta_density * feat
         beta = torch.sigmoid(logit).unsqueeze(-1)
-        return beta, density
+        return beta, raw

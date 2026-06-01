@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=adaptive_beta_only_umls_noperrel
+#SBATCH --job-name=adaptive_beta_only_umls_densunnorm
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=00:30:00
+#SBATCH --time=04:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -51,7 +51,7 @@ BETA_CHECKPOINT="${ORIG_OUTPUT}/beta.pt"
 CONFIG="$HOME/RulE/config/umls_hpc.json"
 
 # Output directory for this adaptive-beta run
-SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_umls_numnorm_noperrel"
+SAVE_PATH="$HOME/RulE/outputs/adaptive_beta_only_umls_densunnorm"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
 # Adaptive-beta hyper-parameters
@@ -106,10 +106,8 @@ python3 -u "$HOME/RulE/scripts/train_beta_grounding.py" \
     --alpha   "${FIXED_ALPHA}" \
     --seed 42 \
     --beta_checkpoint "${BETA_CHECKPOINT}" \
-    --feature num_rules \
-    --normalize_scores \
+    --feature density \
     --standardize_feature \
-    --no_per_relation \
     2>&1 | tee "${SAVE_PATH}/beta_training.log"
 
 TRAIN_RC=${PIPESTATUS[0]}
