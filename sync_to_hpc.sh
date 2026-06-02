@@ -168,6 +168,8 @@ run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls_densunnorm.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls_densnorm.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only_umls.slurm" \
+  "${SCRIPT_DIR}/gat_grounding_only_umls_no_dst.slurm" \
+  "${SCRIPT_DIR}/gat_grounding_only_umls_rule_attn.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only.slurm" \
   "${SCRIPT_DIR}/rule_comparison_gpu.slurm" \
   "${SCRIPT_DIR}/rule_original_wn18rr.slurm" \

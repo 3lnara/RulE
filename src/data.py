@@ -446,7 +446,8 @@ class KnowledgeGraph(object):
 
         return x
 
-    def grounding_with_attention(self, h, r, rule, attn_fn, entity_emb, relation_emb, edges_to_remove):
+    def grounding_with_attention(self, h, r, rule, attn_fn, entity_emb, relation_emb,
+                                 edges_to_remove, rule_emb=None):
         """
         Attention-weighted grounding: same path structure as grounding(), but
         each hop uses GAT edge attention to weight messages.
@@ -455,10 +456,15 @@ class KnowledgeGraph(object):
             h:             [batch] head entity indices
             r:             int, query relation
             rule:          list of int, relation indices forming the rule body
-            attn_fn:       callable(src_emb, dst_emb, rel_emb, node_out, num_nodes) -> [num_edges]
+            attn_fn:       callable returning [num_edges] of attention weights.
+                           Signature: (entity_emb, node_in, node_out, rel_emb,
+                                       num_nodes, rule_emb=None) -> [num_edges].
             entity_emb:    [num_entities, entity_dim] entity embeddings (frozen)
             relation_emb:  [num_relations+1, relation_dim] relation embedding weight
             edges_to_remove: edges to mask out (for the query relation)
+            rule_emb:      [rule_dim] per-rule identity embedding. Forwarded to
+                           the attention function. Used when the GAT variant is
+                           'rule_attn'; ignored otherwise.
 
         Returns:
             result:        [batch, num_entities] attention-weighted grounding scores
@@ -473,14 +479,14 @@ class KnowledgeGraph(object):
         for r_body in rule:
             etr = edges_to_remove if r_body == r else None
             x, edge_attn, node_in, node_out = self.propagate_with_attention(
-                x, r_body, attn_fn, entity_emb, relation_emb, etr
+                x, r_body, attn_fn, entity_emb, relation_emb, etr, rule_emb=rule_emb,
             )
             hop_attentions.append((edge_attn, node_in, node_out))
 
         return x.squeeze(-1).transpose(0, 1), hop_attentions
 
     def propagate_with_attention(self, x, relation, attn_fn, entity_emb, relation_emb,
-                              edges_to_remove=None, chunk_size=64):
+                              edges_to_remove=None, chunk_size=64, rule_emb=None):
         device = x.device
         node_in  = self.relation2adjacency[relation][0][1]
         node_out = self.relation2adjacency[relation][0][0]
@@ -495,8 +501,10 @@ class KnowledgeGraph(object):
 
         # ── Compute edge attention once (no batch dependence). ────────────────
         # This call also accumulates attn_entropy_penalty — happens exactly once
-        # per hop regardless of chunk_size, so no double-counting.
-        edge_attn = attn_fn(entity_emb.detach(), node_in, node_out, rel_emb, x.size(0))
+        # per hop regardless of chunk_size, so no double-counting. rule_emb is
+        # only consumed by GroundingGAT variant='rule_attn'; others ignore it.
+        edge_attn = attn_fn(entity_emb.detach(), node_in, node_out, rel_emb, x.size(0),
+                            rule_emb=rule_emb)
         # edge_attn: [num_edges]
 
         B         = x.size(1)

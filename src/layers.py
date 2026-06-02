@@ -98,29 +98,61 @@ class FuncToNodeSum(nn.Module):
 class GroundingGAT(nn.Module):
     """
     GATv2-style edge attention for rule grounding propagation.
-    
+
     At each hop in a rule body, computes per-edge attention weights from
     source/target entity embeddings and the relation embedding. These weights
     modulate message passing so that the final grounding score at each
     candidate entity is an attention-weighted sum over grounding paths.
-    
+
+    Variants (selected via the `variant` constructor argument):
+      * 'baseline'  -- GATv2: proj = W_src(x_in) + W_dst(x_out) + W_rel(rel)
+                       scored by a shared attn_vec.
+      * 'no_dst'    -- drop W_dst (provably redundant under per-target softmax;
+                       only its LeakyReLU-kink contribution survives in the
+                       baseline). Keeps the shared attn_vec.
+      * 'rule_attn' -- drop W_dst AND replace the shared attn_vec with a
+                       per-rule scoring vector produced by
+                       attn_from_rule(rule_emb). The rule embedding then
+                       controls which attn_dim features matter, so two rules
+                       see different per-edge rankings even on the same edge
+                       set.
+
     Also provides a confidence projection that maps rule embeddings to
     scalar quality scores.
     """
 
-    def __init__(self, entity_dim, relation_dim, attn_dim=128, negative_slope=0.2):
+    _VALID_VARIANTS = ('baseline', 'no_dst', 'rule_attn')
+
+    def __init__(self, entity_dim, relation_dim, attn_dim=128, rule_dim=None,
+                 variant='baseline', negative_slope=0.2):
         super(GroundingGAT, self).__init__()
 
         if attn_dim is None:
             attn_dim = 128
+        if variant not in self._VALID_VARIANTS:
+            raise ValueError(
+                f"Unknown GAT variant '{variant}'. "
+                f"Expected one of {self._VALID_VARIANTS}."
+            )
+        if variant == 'rule_attn' and rule_dim is None:
+            raise ValueError("variant='rule_attn' requires rule_dim to be set.")
 
+        self.variant = variant
         self.attn_dim = attn_dim
         self.negative_slope = negative_slope
 
         self.W_src = nn.Linear(entity_dim, attn_dim, bias=False)
-        self.W_dst = nn.Linear(entity_dim, attn_dim, bias=False)
+        # W_dst only exists in the baseline variant.
+        if variant == 'baseline':
+            self.W_dst = nn.Linear(entity_dim, attn_dim, bias=False)
         self.W_rel = nn.Linear(relation_dim, attn_dim, bias=False)
-        self.attn_vec = nn.Linear(attn_dim, 1, bias=False)
+
+        if variant == 'rule_attn':
+            # Per-rule attention vector: a = attn_from_rule(rule_emb) gives
+            # each rule its own scoring direction in attn_dim space.
+            self.attn_from_rule = nn.Linear(rule_dim, attn_dim, bias=False)
+        else:
+            self.attn_vec = nn.Linear(attn_dim, 1, bias=False)
 
         self.conf_proj = nn.Linear(relation_dim, 1)
 
@@ -147,13 +179,18 @@ class GroundingGAT(nn.Module):
         self.register_buffer('use_frozen_confidence', torch.ones(1, dtype=torch.bool))
     def _reset_parameters(self):
         nn.init.xavier_uniform_(self.W_src.weight)
-        nn.init.xavier_uniform_(self.W_dst.weight)
+        if self.variant == 'baseline':
+            nn.init.xavier_uniform_(self.W_dst.weight)
         nn.init.xavier_uniform_(self.W_rel.weight)
-        nn.init.xavier_uniform_(self.attn_vec.weight)
+        if self.variant == 'rule_attn':
+            nn.init.xavier_uniform_(self.attn_from_rule.weight)
+        else:
+            nn.init.xavier_uniform_(self.attn_vec.weight)
         nn.init.xavier_uniform_(self.conf_proj.weight)
         nn.init.zeros_(self.conf_proj.bias)
 
-    def compute_edge_attention(self, entity_emb, node_in, node_out, rel_emb, num_nodes):
+    def compute_edge_attention(self, entity_emb, node_in, node_out, rel_emb, num_nodes,
+                               rule_emb=None):
         """
         Compute GATv2 attention for each edge, normalized per target node.
 
@@ -166,6 +203,7 @@ class GroundingGAT(nn.Module):
             node_out:   [num_edges]  target node indices (for scatter_softmax)
             rel_emb:    [relation_dim]  (single vector, broadcast over edges)
             num_nodes:  int  total number of nodes
+            rule_emb:   [rule_dim] or None. Required iff variant='rule_attn'.
 
         Returns:
             edge_attn: [num_edges]  attention weight per edge, sums to 1 per target
@@ -175,13 +213,30 @@ class GroundingGAT(nn.Module):
         # for the backward pass; backward of W_src/W_dst uses entity_emb which is
         # already resident in GPU memory.
         all_src_proj = F.linear(entity_emb, self.W_src.weight)  # [num_entities, attn_dim]
-        all_dst_proj = F.linear(entity_emb, self.W_dst.weight)  # [num_entities, attn_dim]
         src_proj = all_src_proj[node_in]   # [num_edges, attn_dim]
-        dst_proj = all_dst_proj[node_out]  # [num_edges, attn_dim]
 
-        proj = src_proj + dst_proj + self.W_rel(rel_emb)
+        if self.variant == 'baseline':
+            all_dst_proj = F.linear(entity_emb, self.W_dst.weight)  # [num_entities, attn_dim]
+            dst_proj = all_dst_proj[node_out]  # [num_edges, attn_dim]
+            proj = src_proj + dst_proj + self.W_rel(rel_emb)
+        else:
+            # no_dst / rule_attn: drop the dst term entirely. Under per-target
+            # softmax it acts as a per-group constant whose only signal comes
+            # through the LeakyReLU kink, which is empirically near-noise.
+            proj = src_proj + self.W_rel(rel_emb)
+
         proj = F.leaky_relu(proj, negative_slope=self.negative_slope)
-        edge_score = self.attn_vec(proj).squeeze(-1)            # [num_edges]
+
+        if self.variant == 'rule_attn':
+            if rule_emb is None:
+                raise ValueError("variant='rule_attn' requires rule_emb at attention time.")
+            # Per-rule scoring vector. proj: [E, attn_dim]; a: [attn_dim];
+            # broadcasting -> [E, attn_dim], sum over attn_dim -> [E].
+            a = self.attn_from_rule(rule_emb)
+            edge_score = (proj * a).sum(-1)                     # [num_edges]
+        else:
+            edge_score = self.attn_vec(proj).squeeze(-1)        # [num_edges]
+
         edge_attn = scatter_softmax(edge_score, node_out, dim=0, dim_size=num_nodes)
         self.last_attn = edge_attn.detach()
 

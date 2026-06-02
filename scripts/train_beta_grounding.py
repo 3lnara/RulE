@@ -49,6 +49,23 @@ def parse_args():
                             'single global scalar (global_beta). Stage 3 then trains '
                             'global_beta; stage 6 trains beta_density on top. Isolates '
                             'whether per-relation calibration is needed.')
+    # Negative sampling for the margin loss -----------------------------------
+    parser.add_argument('--neg_sampling', type=str, default='mixed',
+                       choices=['uniform', 'hard', 'mixed'],
+                       help="Which negatives enter the margin loss per query. "
+                            "'uniform': K random negatives (legacy behaviour). "
+                            "'hard': the K highest-scoring negatives under the "
+                            "current mixed logits. 'mixed' (default): the hardest "
+                            "round(K*mixed_hard_frac) negatives plus the remainder "
+                            "drawn at random from the complement.")
+    parser.add_argument('--num_negatives', type=int, default=100,
+                       help='K: number of negatives sampled per query for the '
+                            'margin loss. If a query has <=K negatives, all are '
+                            'used. Default 100 matches prior runs.')
+    parser.add_argument('--mixed_hard_frac', type=float, default=0.5,
+                       help="Fraction of --num_negatives taken as hardest when "
+                            "--neg_sampling=mixed; the rest are random from the "
+                            "complement (no duplicates). Ignored otherwise.")
     # Reproducibility / persistence ------------------------------------------
     parser.add_argument('--seed', type=int, default=42,
                        help='Global RNG seed (torch / random / cuda) and seed '
@@ -241,8 +258,38 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
     return metrics
 
 
+def select_negative_indices(neg_scores_detached, scheme, num_neg, hard_frac):
+    """Pick which negatives enter the margin loss for one query.
+
+    Ranks by `neg_scores_detached` (the current mixed logits, detached, so the
+    selection is standard hard-negative mining w.r.t. the current model). The
+    caller gathers the *non-detached* scores at the returned indices so the
+    margin loss keeps grad through beta.
+
+    Returns a 1-D LongTensor of indices into the negative pool.
+    """
+    n = neg_scores_detached.size(0)
+    device = neg_scores_detached.device
+    if n <= num_neg:
+        return torch.arange(n, device=device)
+    if scheme == 'uniform':
+        return torch.randperm(n, device=device)[:num_neg]
+    if scheme == 'hard':
+        return torch.topk(neg_scores_detached, num_neg).indices
+    # mixed: hardest n_hard + random from the rest (no duplicates).
+    n_hard = min(int(round(num_neg * hard_frac)), n)
+    hard_idx = torch.topk(neg_scores_detached, n_hard).indices
+    keep = torch.ones(n, dtype=torch.bool, device=device)
+    keep[hard_idx] = False
+    rest = keep.nonzero(as_tuple=True)[0]
+    n_rand = num_neg - n_hard
+    rand_idx = rest[torch.randperm(rest.size(0), device=device)[:n_rand]]
+    return torch.cat([hard_idx, rand_idx])
+
+
 def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
-                     normalize_scores=False):
+                     normalize_scores=False, neg_sampling='mixed',
+                     num_negatives=100, mixed_hard_frac=0.5):
     """Train beta (and beta_density if adaptive) for one epoch."""
     model.train()
 
@@ -305,10 +352,14 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
                 negative_mask = flag[i] & (torch.arange(logits.size(1), device=device) != all_t[i])
                 if negative_mask.sum() > 0:
                     negative_scores = logits[i][negative_mask]
-                    # Sample some negatives to keep computation manageable
-                    if negative_scores.size(0) > 100:
-                        idx = torch.randperm(negative_scores.size(0))[:100]
-                        negative_scores = negative_scores[idx]
+                    # Select which negatives enter the margin loss. Rank by the
+                    # detached scores (hard-negative mining), gather the live
+                    # scores so grad still flows through beta.
+                    idx = select_negative_indices(
+                        negative_scores.detach(), neg_sampling,
+                        num_negatives, mixed_hard_frac,
+                    )
+                    negative_scores = negative_scores[idx]
                     
                     # Margin ranking loss: true_score should be > negative_score + margin
                     true_score = true_scores[i]
@@ -824,6 +875,7 @@ def main():
     print(f"Normalize rule/KGE scores: {args.normalize_scores}")
     print(f"Standardize feature: {args.standardize_feature}")
     print(f"Use per-relation intercept: {not args.no_per_relation}")
+    print(f"Negative sampling: {args.neg_sampling} (K={args.num_negatives}, hard_frac={args.mixed_hard_frac})")
     
     # Load config
     config = load_config(args.config)
@@ -1000,7 +1052,10 @@ def main():
 
         for epoch in range(args.epochs):
             loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False,
-                                    normalize_scores=args.normalize_scores)
+                                    normalize_scores=args.normalize_scores,
+                                    neg_sampling=args.neg_sampling,
+                                    num_negatives=args.num_negatives,
+                                    mixed_hard_frac=args.mixed_hard_frac)
             model.eval()
             val_metrics = evaluate(model, valid_select_loader, device, use_beta=True,
                                    normalize_scores=args.normalize_scores)
@@ -1076,7 +1131,10 @@ def main():
 
         for epoch in range(args.epochs):
             loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True,
-                                    normalize_scores=args.normalize_scores)
+                                    normalize_scores=args.normalize_scores,
+                                    neg_sampling=args.neg_sampling,
+                                    num_negatives=args.num_negatives,
+                                    mixed_hard_frac=args.mixed_hard_frac)
             model.eval()
             val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True,
                                    normalize_scores=args.normalize_scores)

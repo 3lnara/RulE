@@ -2,7 +2,7 @@
 #SBATCH --job-name=ablation_fb15k
 #SBATCH --partition=mcs.gpu.q
 #SBATCH --constraint=v100
-#SBATCH --time=72:00:00
+#SBATCH --time=14-00:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G

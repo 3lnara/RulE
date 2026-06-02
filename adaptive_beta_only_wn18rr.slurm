@@ -57,9 +57,11 @@ GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
 # Adaptive-beta hyper-parameters
 BETA_EPOCHS=10
-BETA_LR=0.01
+BETA_LR=0.001
 BETA_DENSITY_LR=0.001
 FIXED_ALPHA=1.0   # baseline alpha for comparison table
+SEED = 42
+
 
 echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
@@ -92,6 +94,48 @@ GPU_MON_PID=$!
 echo "GPU memory monitor PID : ${GPU_MON_PID}  (log: ${GPU_LOG})"
 echo ""
 
+COMMON_ARGS=(
+    --config             "${CONFIG}"
+    --checkpoint         "${GROUNDING_CHECKPOINT}"
+    --epochs             "${BETA_EPOCHS}"
+    --lr                 "${BETA_LR}"
+    --density_lr         "${BETA_DENSITY_LR}"
+    --alpha              "${FIXED_ALPHA}"
+    --seed               "${SEED}"
+)
+run_variant() {
+    local name="$1"
+    shift
+    local variant_dir="${ABLATION_ROOT}/${name}"
+    mkdir -p "${variant_dir}"
+
+    echo "────────────────────────────────────────────────────────────────"
+    echo "  Variant : ${name}"
+    echo "  Args    : $*"
+    echo "  Dir     : ${variant_dir}"
+    echo "  Started : $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "────────────────────────────────────────────────────────────────"
+
+    local t0
+    t0=$(date +%s)
+
+    python3 -u "$HOME/RulE/scripts/train_beta_grounding_chunked.py" \
+        "${COMMON_ARGS[@]}" \
+        --beta_checkpoint "${variant_dir}/beta.pt" \
+        "$@" \
+        2>&1 | tee "${variant_dir}/training.log"
+
+    VARIANT_RC=${PIPESTATUS[0]}
+    local t1
+    t1=$(date +%s)
+    VARIANT_WALL=$(( t1 - t0 ))
+
+    printf "  Finished : $(date '+%Y-%m-%d %H:%M:%S')  |  wall %dh%02dm%02ds  |  rc=%d\n" \
+        $(( VARIANT_WALL / 3600 )) $(( (VARIANT_WALL % 3600) / 60 )) $(( VARIANT_WALL % 60 )) \
+        "${VARIANT_RC}"
+    echo ""
+}
+
 # ── Run adaptive beta training ─────────────────────────────────────────────────
 # train_beta_grounding.py imports from the src/ package (data, model, utils),
 # so it must be run with src/ on the Python path.
@@ -110,6 +154,8 @@ python3 -u "$HOME/RulE/scripts/train_beta_grounding_chunked.py" \
     --feature density \
     --seed 42 \
     --beta_checkpoint "${BETA_CHECKPOINT}" \
+    --neg_sampling mixed \
+    --num_negatives 100 \
     2>&1 | tee "${SAVE_PATH}/beta_training.log"
 
 TRAIN_RC=${PIPESTATUS[0]}

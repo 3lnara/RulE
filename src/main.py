@@ -108,6 +108,17 @@ def parse_args(args=None):
                              '\u03bb * \u03a3 a*log(a) to the loss; with \u03bb>0 this rewards uniform '
                              'attention (\u03a3 a*log(a) is most negative when uniform, ~0 when peaked). '
                              '0 disables (default). Try 1e-4 \u2013 1e-3.')
+    parser.add_argument('--attn_dim', default=128, type=int,
+                        help='Attention hidden dimension for GroundingGAT. '
+                             'Default 128. Use 64 on small graphs (UMLS) to reduce overfitting.')
+    parser.add_argument('--gat_variant', default='baseline', type=str,
+                        choices=['baseline', 'no_dst', 'rule_attn'],
+                        help='GAT architecture for rule grounding. '
+                             'baseline: GATv2 with W_src + W_dst + W_rel and a shared attn_vec. '
+                             'no_dst: drop W_dst (provably redundant under per-target softmax) '
+                             '       -- variant 2-clean. '
+                             'rule_attn: drop W_dst and replace the shared attn_vec with a '
+                             '          rule-conditioned attn_from_rule(rule_emb) -- Option A.')
     return parser.parse_args(args)
 
 def main():
@@ -120,6 +131,8 @@ def main():
     cli_freeze_conf_proj = args.freeze_conf_proj
     cli_attn_entropy_weight = args.attn_entropy_weight
     cli_use_rule_confidence_variant_a = args.use_rule_confidence_variant_a
+    cli_attn_dim = args.attn_dim
+    cli_gat_variant = args.gat_variant
 
 
     # read the given config
@@ -135,6 +148,8 @@ def main():
     args.freeze_conf_proj = cli_freeze_conf_proj
     args.attn_entropy_weight = cli_attn_entropy_weight
     args.use_rule_confidence_variant_a = cli_use_rule_confidence_variant_a
+    args.attn_dim = cli_attn_dim
+    args.gat_variant = cli_gat_variant
     if args.save_path is None:
         args.save_path = os.path.join('../outputs', datetime.now().strftime('%Y%m-%d%H-%M%S'))
     
@@ -162,7 +177,7 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path)
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path, attn_dim=args.attn_dim, gat_variant=args.gat_variant)
     RulE_model.set_rules(rules)
 
     if not args.skip_pretrain:

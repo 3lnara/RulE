@@ -7,7 +7,7 @@ from layers import MLP, FuncToNodeSum, GroundingGAT
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, attn_dim=128, gat_variant='baseline'):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -26,9 +26,14 @@ class RulE(torch.nn.Module):
 
         self.mlp_rule_dim = mlp_rule_dim
 
+        # rule_dim matches set_rules() which sets self.rule_dim = self.hidden_dim.
+        # Only consumed by variant='rule_attn'; passing it unconditionally is harmless.
         self.grounding_gat = GroundingGAT(
             entity_dim=self.hidden_dim * 2,
             relation_dim=self.hidden_dim,
+            attn_dim=attn_dim,
+            rule_dim=self.hidden_dim,
+            variant=gat_variant,
         )
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
@@ -362,11 +367,16 @@ class RulE(torch.nn.Module):
         for index, (r_head, r_body) in self.relation2rules[query_r]:
             assert r_head == query_r
 
+            # Per-rule identity embedding (learnable, dim=hidden_dim). Forwarded
+            # to the GAT; only variant='rule_attn' actually consumes it.
+            rule_identity_emb = self.rule_emb.weight[index]
+
             attn_count, hop_attentions = self.graph.grounding_with_attention(
                 all_h, r_head, r_body,
                 self.grounding_gat.compute_edge_attention,
                 entity_emb, relation_emb,
                 edges_to_remove,
+                rule_emb=rule_identity_emb,
             )
 
             rule_emb_vec = self.rules_weight_emb[index]
