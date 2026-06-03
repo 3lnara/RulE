@@ -81,6 +81,12 @@ def parse_args():
                             'beta and beta_density from --beta_checkpoint and run '
                             'only the test evaluations + post-eval analyses. '
                             'Useful for cheap iteration on diagnostics.')
+    parser.add_argument('--beta_l2', type=float, default=0.0,
+                       help='L2 regularization coefficient on model.beta (or global_beta). '
+                            'Adds beta_l2 * mean(beta**2) to the per-batch loss, shrinking '
+                            'per-relation betas toward 0 in logit space (sigmoid=0.5, '
+                            'neutral routing). Counteracts overfitting on small-n relations. '
+                            'Default 0.0 (disabled). Try 0.01, 0.1, 1.0.')
     return parser.parse_args()
 
 
@@ -279,7 +285,7 @@ def select_negative_indices(neg_scores_detached, scheme, num_neg, hard_frac):
 
 def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
                      normalize_scores=False, neg_sampling='mixed',
-                     num_negatives=100, mixed_hard_frac=0.5):
+                     num_negatives=100, mixed_hard_frac=0.5, beta_l2=0.0):
     """Train beta (and beta_density if adaptive) for one epoch.
 
     Memory strategy for large datasets (e.g. WN18RR, 40 943 entities):
@@ -403,6 +409,17 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
             loss = torch.clamp(1.0 - true_score + neg_scores, min=0).mean() / N
             loss.backward()
             batch_loss_sum += loss.item()
+
+        # L2 regularization on the intercept parameter (stage 3 only; during
+        # stage 6 beta/global_beta has requires_grad=False so this is a no-op).
+        # Penalty shrinks logits toward 0 => sigmoid toward 0.5 (neutral routing).
+        # Applied once per batch, after the per-sample accumulation, so its
+        # gradient is not divided by N (it is a batch-level term, not per-sample).
+        if beta_l2 > 0.0:
+            if model.use_per_relation and model.beta.requires_grad:
+                (beta_l2 * (model.beta ** 2).mean()).backward()
+            elif not model.use_per_relation and model.global_beta.requires_grad:
+                (beta_l2 * (model.global_beta ** 2)).backward()
 
         optimizer.step()
 
@@ -1077,7 +1094,8 @@ def main():
                                     normalize_scores=args.normalize_scores,
                                     neg_sampling=args.neg_sampling,
                                     num_negatives=args.num_negatives,
-                                    mixed_hard_frac=args.mixed_hard_frac)
+                                    mixed_hard_frac=args.mixed_hard_frac,
+                                    beta_l2=args.beta_l2)
             model.eval()
             val_metrics = evaluate(model, valid_select_loader, device, use_beta=True,
                                    normalize_scores=args.normalize_scores)
@@ -1158,7 +1176,8 @@ def main():
                                     normalize_scores=args.normalize_scores,
                                     neg_sampling=args.neg_sampling,
                                     num_negatives=args.num_negatives,
-                                    mixed_hard_frac=args.mixed_hard_frac)
+                                    mixed_hard_frac=args.mixed_hard_frac,
+                                    beta_l2=args.beta_l2)
             model.eval()
             val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True,
                                    normalize_scores=args.normalize_scores)
