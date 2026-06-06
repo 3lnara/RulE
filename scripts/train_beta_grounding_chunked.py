@@ -87,6 +87,33 @@ def parse_args():
                             'per-relation betas toward 0 in logit space (sigmoid=0.5, '
                             'neutral routing). Counteracts overfitting on small-n relations. '
                             'Default 0.0 (disabled). Try 0.01, 0.1, 1.0.')
+    # Loss type for the mixing-weight (beta) training --------------------------
+    parser.add_argument('--loss', type=str, default='margin',
+                       choices=['margin', 'ce'],
+                       help="Training objective for the mixing weight. "
+                            "'margin' (default, legacy): pairwise hinge "
+                            "clamp(1 - s(true) + s(neg)) over sampled negatives "
+                            "(uses --neg_sampling/--num_negatives/--mixed_hard_frac). "
+                            "'ce': filtered softmax cross-entropy -log softmax(s)[true] "
+                            "over the FULL filtered candidate set (the true tail vs all "
+                            "non-known-positive entities). This mirrors the loss RulE's "
+                            "GroundTrainer used to fit the rule scorer and matches the "
+                            "filtered-ranking eval protocol; --neg_sampling args are "
+                            "ignored under 'ce'.")
+    parser.add_argument('--label_smoothing', type=float, default=0.0,
+                       help="Label smoothing for --loss ce only. The per-query CE target "
+                            "becomes (1-eps) on the true tail + eps uniform over all "
+                            "filtered candidates, i.e. loss = -((1-eps)*logp[true] + "
+                            "eps*mean(logp)). Echoes the label-smoothing GroundTrainer "
+                            "applies (config 'smoothing'). Default 0.0 (hard target). "
+                            "Ignored under --loss margin.")
+    parser.add_argument('--skip_adaptive', action='store_true',
+                       help='Skip stages [5], [6], [7]: do NOT train or evaluate the '
+                            'query-adaptive beta (beta_density). Trains/evaluates the '
+                            'per-relation (or global) intercept only and stops there. '
+                            'Since beta_density stays 0, adaptive beta would equal the '
+                            'per-relation beta exactly, so the adaptive column is dropped '
+                            'from the summary/tables. Use for a clean per-relation-only run.')
     return parser.parse_args()
 
 
@@ -285,8 +312,24 @@ def select_negative_indices(neg_scores_detached, scheme, num_neg, hard_frac):
 
 def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
                      normalize_scores=False, neg_sampling='mixed',
-                     num_negatives=100, mixed_hard_frac=0.5, beta_l2=0.0):
+                     num_negatives=100, mixed_hard_frac=0.5, beta_l2=0.0,
+                     loss_type='margin', label_smoothing=0.0):
     """Train beta (and beta_density if adaptive) for one epoch.
+
+    Two objectives are supported via `loss_type`:
+    - 'margin' (legacy): per-query pairwise hinge
+          mean_neg clamp(1 - s(true) + s(neg))
+      over a sampled subset of negatives (controlled by neg_sampling /
+      num_negatives / mixed_hard_frac). Looks only at the sampled negatives and
+      is insensitive to score calibration beyond the fixed margin.
+    - 'ce': per-query filtered softmax cross-entropy
+          -((1 - eps) * logp[true] + eps * mean(logp)),  logp = log_softmax(s_cand)
+      where s_cand stacks the true-tail score with ALL filtered candidate
+      negatives (flag-True entities, i.e. everything except known positives).
+      This is the listwise objective RulE's GroundTrainer used to fit the rule
+      scorer and is the calibrated surrogate for the filtered-ranking metric;
+      it uses every candidate, so neg_sampling args are ignored. `label_smoothing`
+      (eps) mirrors GroundTrainer's `smoothing`.
 
     Memory strategy for large datasets (e.g. WN18RR, 40 943 entities):
     - rule_logits and kge_score are computed once under no_grad and kept on GPU
@@ -391,22 +434,43 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
 
             logit_i = beta_i * rl_i + (1 - beta_i) * kg_i   # [1, E], grad through beta only
 
+            # Filtered negatives: every flag-True entity that is not the true
+            # tail. `flag` is built from hr2ooo, so it already excludes all known
+            # positives (incl. the held-out tail); the `!= all_t[i]` guard makes
+            # the exclusion explicit and robust to the flag convention.
             negative_mask = flag[i] & (torch.arange(logit_i.size(1), device=device) != all_t[i])
-            neg_all = logit_i[0][negative_mask]
-            # Select which negatives enter the margin loss. Rank by the detached
-            # scores (hard-negative mining), gather the live scores so grad still
-            # flows through beta.
-            idx = select_negative_indices(
-                neg_all.detach(), neg_sampling, num_negatives, mixed_hard_frac,
-            )
-            neg_scores = neg_all[idx]
-
             true_score = logit_i[0, all_t[i]]
-            # Per-sample mean over negatives, then divide by N so the per-sample
-            # gradients add up to the batch mean (equivalent to stacking and
-            # calling .mean().backward() in the non-chunked version, but with
-            # per-sample memory).
-            loss = torch.clamp(1.0 - true_score + neg_scores, min=0).mean() / N
+
+            if loss_type == 'ce':
+                # Filtered softmax cross-entropy over {true tail} ∪ {all filtered
+                # negatives}. -log p(true) directly minimizes the filtered rank of
+                # the true tail (matches evaluate()'s ranking) using the WHOLE
+                # candidate set rather than a sampled subset -> lower-variance,
+                # better-specified gradient for the single per-relation scalar.
+                neg_scores = logit_i[0][negative_mask]
+                all_scores = torch.cat([true_score.view(1), neg_scores])   # idx 0 = true tail
+                logp = torch.log_softmax(all_scores, dim=-1)
+                if label_smoothing > 0.0:
+                    # (1-eps) on the true tail + eps uniform over all candidates.
+                    sample_loss = -((1.0 - label_smoothing) * logp[0]
+                                    + label_smoothing * logp.mean())
+                else:
+                    sample_loss = -logp[0]
+                loss = sample_loss / N
+            else:
+                # Margin / hinge over a sampled subset of negatives. Rank by the
+                # detached scores (hard-negative mining), gather the live scores
+                # so grad still flows through beta.
+                neg_all = logit_i[0][negative_mask]
+                idx = select_negative_indices(
+                    neg_all.detach(), neg_sampling, num_negatives, mixed_hard_frac,
+                )
+                neg_scores = neg_all[idx]
+                # Per-sample mean over negatives, then divide by N so the per-sample
+                # gradients add up to the batch mean (equivalent to stacking and
+                # calling .mean().backward() in the non-chunked version, but with
+                # per-sample memory).
+                loss = torch.clamp(1.0 - true_score + neg_scores, min=0).mean() / N
             loss.backward()
             batch_loss_sum += loss.item()
 
@@ -908,7 +972,12 @@ def main():
     print(f"Normalize rule/KGE scores: {args.normalize_scores}")
     print(f"Standardize feature: {args.standardize_feature}")
     print(f"Use per-relation intercept: {not args.no_per_relation}")
-    print(f"Negative sampling: {args.neg_sampling} (K={args.num_negatives}, hard_frac={args.mixed_hard_frac})")
+    print(f"Loss type: {args.loss}" + (f" (label_smoothing={args.label_smoothing})" if args.loss == 'ce' else ""))
+    if args.loss == 'ce':
+        print("Negative sampling: N/A (CE uses the full filtered candidate set)")
+    else:
+        print(f"Negative sampling: {args.neg_sampling} (K={args.num_negatives}, hard_frac={args.mixed_hard_frac})")
+    print(f"Adaptive beta stage: {'DISABLED (--skip_adaptive)' if args.skip_adaptive else 'enabled'}")
     
     # Load config
     config = load_config(args.config)
@@ -1095,7 +1164,9 @@ def main():
                                     neg_sampling=args.neg_sampling,
                                     num_negatives=args.num_negatives,
                                     mixed_hard_frac=args.mixed_hard_frac,
-                                    beta_l2=args.beta_l2)
+                                    beta_l2=args.beta_l2,
+                                    loss_type=args.loss,
+                                    label_smoothing=args.label_smoothing)
             model.eval()
             val_metrics = evaluate(model, valid_select_loader, device, use_beta=True,
                                    normalize_scores=args.normalize_scores)
@@ -1138,116 +1209,139 @@ def main():
     print_results(f"{_stage3_label} (trained)", metrics_beta_after)
     print_beta_stats(model)
     
-    # === Adaptive Beta ===
+    # === Adaptive Beta (optional; disabled by --skip_adaptive) ===
     best_mrr_adaptive = float('nan')
     best_epoch_6 = -1
 
-    if args.skip_beta_training:
-        # beta and beta_density were already loaded above; just skip [5] and [6].
-        print(f"\n[5/6] SKIPPED -- using loaded beta_density")
-        print(f"      best_mrr (6):   {beta_state.get('best_mrr_stage6', 'unknown')}")
-        print(f"      epoch_best (6): {beta_state.get('epoch_best_stage6', 'unknown')}")
-        best_mrr_adaptive = beta_state.get('best_mrr_stage6', best_mrr_adaptive)
-        best_epoch_6 = beta_state.get('epoch_best_stage6', best_epoch_6)
+    if args.skip_adaptive:
+        # Stages [5], [6], [7] disabled. beta_density was never trained (==0),
+        # so adaptive beta = sigmoid(beta[r] + 0*feat) = the per-relation beta
+        # exactly. Alias the per-relation results so the downstream summary /
+        # post-eval code has well-defined inputs without paying for another full
+        # 40 943-entity test eval. The Adaptive column is dropped from the
+        # summary/tables below.
+        print(f"\n[5/6/7] SKIPPED -- adaptive beta disabled (--skip_adaptive).")
+        print(f"        beta_density stays {model.beta_density.item():.4f}; "
+              f"adaptive == per-relation beta, so its column is omitted.")
+        metrics_adaptive_after = metrics_beta_after
+        pq_adaptive = pq_beta
     else:
-        print(f"\n[5] Testing with ADAPTIVE BETA (before training)...")
-        metrics_adaptive_before = evaluate(model, test_dataloader, device, adaptive_beta=True,
-                                           normalize_scores=args.normalize_scores)
-        print_results("Adaptive Beta (untrained)", metrics_adaptive_before)
+        if args.skip_beta_training:
+            # beta and beta_density were already loaded above; just skip [5] and [6].
+            print(f"\n[5/6] SKIPPED -- using loaded beta_density")
+            print(f"      best_mrr (6):   {beta_state.get('best_mrr_stage6', 'unknown')}")
+            print(f"      epoch_best (6): {beta_state.get('epoch_best_stage6', 'unknown')}")
+            best_mrr_adaptive = beta_state.get('best_mrr_stage6', best_mrr_adaptive)
+            best_epoch_6 = beta_state.get('epoch_best_stage6', best_epoch_6)
+        else:
+            print(f"\n[5] Testing with ADAPTIVE BETA (before training)...")
+            metrics_adaptive_before = evaluate(model, test_dataloader, device, adaptive_beta=True,
+                                               normalize_scores=args.normalize_scores)
+            print_results("Adaptive Beta (untrained)", metrics_adaptive_before)
 
-        # Train adaptive beta (beta_rel + beta_density)
-        print(f"\n[6] Training adaptive beta for {args.epochs} epochs...")
+            # Train adaptive beta (beta_rel + beta_density)
+            print(f"\n[6] Training adaptive beta for {args.epochs} epochs...")
 
-        model.beta.requires_grad = False
-        model.global_beta.requires_grad = False   # frozen from stage 3
-        model.beta_density.requires_grad = True
-        optimizer_adaptive = torch.optim.Adam(
-            [model.beta_density], lr=args.density_lr
+            model.beta.requires_grad = False
+            model.global_beta.requires_grad = False   # frozen from stage 3
+            model.beta_density.requires_grad = True
+            optimizer_adaptive = torch.optim.Adam(
+                [model.beta_density], lr=args.density_lr
+            )
+
+            best_mrr_adaptive = 0
+            best_beta_adaptive = model.beta.data.clone()
+            best_global_adaptive = model.global_beta.data.clone()
+            best_density = model.beta_density.data.clone()
+            best_epoch_6 = 0
+
+            for epoch in range(args.epochs):
+                loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True,
+                                        normalize_scores=args.normalize_scores,
+                                        neg_sampling=args.neg_sampling,
+                                        num_negatives=args.num_negatives,
+                                        mixed_hard_frac=args.mixed_hard_frac,
+                                        beta_l2=args.beta_l2,
+                                        loss_type=args.loss,
+                                        label_smoothing=args.label_smoothing)
+                model.eval()
+                val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True,
+                                       normalize_scores=args.normalize_scores)
+
+                print(f"\nEpoch {epoch+1}/{args.epochs}:")
+                print(f"  Loss: {loss:.4f}")
+                print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+                print(f"  beta_density = {model.beta_density.item():.4f}")
+                if not model.use_per_relation:
+                    print(f"  global_beta  = {model.global_beta.item():.4f}  "
+                          f"(prob: {torch.sigmoid(model.global_beta).item():.4f})")
+
+                if val_metrics['MRR'] > best_mrr_adaptive:
+                    best_mrr_adaptive = val_metrics['MRR']
+                    best_beta_adaptive = model.beta.data.clone()
+                    best_global_adaptive = model.global_beta.data.clone()
+                    best_density = model.beta_density.data.clone()
+                    best_epoch_6 = epoch + 1
+                    print(f"  New best MRR!")
+
+            model.beta.data = best_beta_adaptive
+            model.global_beta.data = best_global_adaptive
+            model.beta_density.data = best_density
+
+            # Final save: full trained state from both stages.
+            save_beta_checkpoint(
+                beta_ckpt_path, model,
+                stage='stage6',
+                seed=args.seed,
+                best_mrr_stage3=best_mrr,
+                epoch_best_stage3=best_epoch_3,
+                best_mrr_stage6=best_mrr_adaptive,
+                epoch_best_stage6=best_epoch_6,
+                base_checkpoint=os.path.abspath(args.checkpoint),
+                feature_name=model.feature_name,
+                standardize_feature=model.standardize_feature,
+                feature_mean=model.feature_mean.detach().cpu().clone(),
+                feature_std=model.feature_std.detach().cpu().clone(),
+            )
+
+        print(f"\n[7] Testing with TRAINED adaptive beta...")
+        metrics_adaptive_after, pq_adaptive = evaluate(
+            model, test_dataloader, device, adaptive_beta=True, return_per_query=True,
+            normalize_scores=args.normalize_scores,
         )
+        print_results("Adaptive Beta (trained)", metrics_adaptive_after)
+        print_beta_stats(model)
 
-        best_mrr_adaptive = 0
-        best_beta_adaptive = model.beta.data.clone()
-        best_global_adaptive = model.global_beta.data.clone()
-        best_density = model.beta_density.data.clone()
-        best_epoch_6 = 0
-
-        for epoch in range(args.epochs):
-            loss = train_beta_epoch(model, valid_train_loader, optimizer_adaptive, device, adaptive=True,
-                                    normalize_scores=args.normalize_scores,
-                                    neg_sampling=args.neg_sampling,
-                                    num_negatives=args.num_negatives,
-                                    mixed_hard_frac=args.mixed_hard_frac,
-                                    beta_l2=args.beta_l2)
-            model.eval()
-            val_metrics = evaluate(model, valid_select_loader, device, adaptive_beta=True,
-                                   normalize_scores=args.normalize_scores)
-
-            print(f"\nEpoch {epoch+1}/{args.epochs}:")
-            print(f"  Loss: {loss:.4f}")
-            print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
-            print(f"  beta_density = {model.beta_density.item():.4f}")
-            if not model.use_per_relation:
-                print(f"  global_beta  = {model.global_beta.item():.4f}  "
-                      f"(prob: {torch.sigmoid(model.global_beta).item():.4f})")
-
-            if val_metrics['MRR'] > best_mrr_adaptive:
-                best_mrr_adaptive = val_metrics['MRR']
-                best_beta_adaptive = model.beta.data.clone()
-                best_global_adaptive = model.global_beta.data.clone()
-                best_density = model.beta_density.data.clone()
-                best_epoch_6 = epoch + 1
-                print(f"  New best MRR!")
-
-        model.beta.data = best_beta_adaptive
-        model.global_beta.data = best_global_adaptive
-        model.beta_density.data = best_density
-
-        # Final save: full trained state from both stages.
-        save_beta_checkpoint(
-            beta_ckpt_path, model,
-            stage='stage6',
-            seed=args.seed,
-            best_mrr_stage3=best_mrr,
-            epoch_best_stage3=best_epoch_3,
-            best_mrr_stage6=best_mrr_adaptive,
-            epoch_best_stage6=best_epoch_6,
-            base_checkpoint=os.path.abspath(args.checkpoint),
-            feature_name=model.feature_name,
-            standardize_feature=model.standardize_feature,
-            feature_mean=model.feature_mean.detach().cpu().clone(),
-            feature_std=model.feature_std.detach().cpu().clone(),
-        )
-
-    print(f"\n[7] Testing with TRAINED adaptive beta...")
-    metrics_adaptive_after, pq_adaptive = evaluate(
-        model, test_dataloader, device, adaptive_beta=True, return_per_query=True,
-        normalize_scores=args.normalize_scores,
-    )
-    print_results("Adaptive Beta (trained)", metrics_adaptive_after)
-    print_beta_stats(model)
-    
     # === Summary ===
     print(f"\n{'='*60}")
     print("SUMMARY COMPARISON")
     print(f"{'='*60}")
     _rl = "Rel-Beta" if model.use_per_relation else "Global-Beta"
-    print(f"{'Metric':<10} {'Fixed alpha':<14} {_rl:<14} {'Adaptive':<12}")
-    print("-" * 54)
-    
-    for metric in ['Hit@1', 'Hit@3', 'Hit@10', 'MR', 'MRR']:
-        fixed = metrics_fixed[metric]
-        rel = metrics_beta_after[metric]
-        adaptive = metrics_adaptive_after[metric]
-        print(f"{metric:<10} {fixed:<14.4f} {rel:<14.4f} {adaptive:<12.4f}")
-    
-    print(f"\nbeta_density learned = {model.beta_density.item():.4f}")
-    fn = model.feature_name
-    if model.beta_density.item() > 0:
-        print(f"Interpretation: higher {fn} -> trust rules more (as expected)")
-    elif model.beta_density.item() < 0:
-        print(f"Interpretation: higher {fn} -> trust KGE more (counterintuitive)")
+    if args.skip_adaptive:
+        print(f"{'Metric':<10} {'Fixed alpha':<14} {_rl:<14}")
+        print("-" * 40)
+        for metric in ['Hit@1', 'Hit@3', 'Hit@10', 'MR', 'MRR']:
+            fixed = metrics_fixed[metric]
+            rel = metrics_beta_after[metric]
+            print(f"{metric:<10} {fixed:<14.4f} {rel:<14.4f}")
+        print(f"\nAdaptive beta disabled (--skip_adaptive); beta_density not trained.")
     else:
-        print(f"Interpretation: {fn} has no effect on mixing")
+        print(f"{'Metric':<10} {'Fixed alpha':<14} {_rl:<14} {'Adaptive':<12}")
+        print("-" * 54)
+        for metric in ['Hit@1', 'Hit@3', 'Hit@10', 'MR', 'MRR']:
+            fixed = metrics_fixed[metric]
+            rel = metrics_beta_after[metric]
+            adaptive = metrics_adaptive_after[metric]
+            print(f"{metric:<10} {fixed:<14.4f} {rel:<14.4f} {adaptive:<12.4f}")
+
+        print(f"\nbeta_density learned = {model.beta_density.item():.4f}")
+        fn = model.feature_name
+        if model.beta_density.item() > 0:
+            print(f"Interpretation: higher {fn} -> trust rules more (as expected)")
+        elif model.beta_density.item() < 0:
+            print(f"Interpretation: higher {fn} -> trust KGE more (counterintuitive)")
+        else:
+            print(f"Interpretation: {fn} has no effect on mixing")
 
     # === Post-eval analyses ===
     # All four reports run on the per-query data captured at steps [1], [4], [7].
@@ -1259,8 +1353,12 @@ def main():
     method_to_ranks = {
         fixed_label: pq_fixed['ranks'],
         rel_label:   pq_beta['ranks'],
-        "Adaptive":  pq_adaptive['ranks'],
     }
+    if not args.skip_adaptive:
+        method_to_ranks["Adaptive"] = pq_adaptive['ranks']
+    # With the adaptive column dropped, the per-relation table's "delta" column
+    # compares the trained per-relation beta against the fixed-alpha baseline.
+    adaptive_method_name = "Adaptive" if not args.skip_adaptive else rel_label
 
     # 1. Per-bucket MRR / Hit@1 / Hit@10 / MR by feature quintile.
     print_bucket_analysis(
@@ -1277,7 +1375,7 @@ def main():
         model=model,
         densities=pq_fixed['feature'],
         fixed_method_name=fixed_label,
-        adaptive_method_name="Adaptive",
+        adaptive_method_name=adaptive_method_name,
     )
 
     # 3. Feature-validity: does the per-query feature predict where rules beat

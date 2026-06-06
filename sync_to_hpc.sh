@@ -107,8 +107,18 @@ run_rsync "${DEST_BASE}/src/" \
   "${SCRIPT_DIR}/src/trainer.py" \
   "${SCRIPT_DIR}/src/utils.py" \
   || OVERALL_EXIT=$?
+# 2. src_additive/ → remote src_additive/
+run_rsync "${DEST_BASE}/src_additive/" \
+  "${SCRIPT_DIR}/src_additive/data.py" \
+  "${SCRIPT_DIR}/src_additive/layers.py" \
+  "${SCRIPT_DIR}/src_additive/main.py" \
+  "${SCRIPT_DIR}/src_additive/model.py" \
+  "${SCRIPT_DIR}/src_additive/trainer.py" \
+  "${SCRIPT_DIR}/src_additive/utils.py" \
+  || OVERALL_EXIT=$?
 
 run_rsync "${DEST_BASE}/scripts/" \
+  "${SCRIPT_DIR}/scripts/feature_validity_screen.py" \
   "${SCRIPT_DIR}/scripts/run_comparison.py" \
   "${SCRIPT_DIR}/scripts/compare_balancing.py" \
   "${SCRIPT_DIR}/scripts/parse_gat_metrics.py" \
@@ -161,9 +171,15 @@ run_rsync "${DEST_BASE}/slurm/" \
   || OVERALL_EXIT=$?
 
 run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
+  "${SCRIPT_DIR}/feature_validity_umls.slurm" \
+  "${SCRIPT_DIR}/feature_validity_wn18rr.slurm" \
+  "${SCRIPT_DIR}/feature_validity_fb15k.slurm" \
+  "${SCRIPT_DIR}/feature_validity_family.slurm" \
+  "${SCRIPT_DIR}/additive_lever1_umls.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr_numnorm_rel.slurm" \
+  "${SCRIPT_DIR}/beta_ce_perrel_wn18rr.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls_densunnorm.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls_densnorm.slurm" \
