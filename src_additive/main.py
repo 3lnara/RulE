@@ -103,6 +103,28 @@ def parse_args(args=None):
                              'matches the frozen baseline. Implies --simple_aggregation. '
                              'Without this flag (but with --simple_aggregation), w_R is frozen '
                              'at the RulE confidence.')
+
+    # === Factorization-Machine pairwise rule interactions ===
+    parser.add_argument('--fm_interactions', action='store_true', default=False,
+                        help='Add a learnable pairwise FM term over a binary co-fire basis: '
+                             'score[t] += sum_{R<R\'} <v_R, v_R\'> * 1[c_R[t]>0] * 1[c_R\'[t]>0]. '
+                             'Implies the additive/frozen-linear path; with the linear weights '
+                             'frozen, any gain is attributable purely to rule interactions.')
+    parser.add_argument('--fm_rank', type=int, default=16,
+                        help='Latent dimension k of the per-rule FM embedding v_R.')
+    parser.add_argument('--fm_l2', type=float, default=1e-5,
+                        help='L2 weight decay applied ONLY to the FM embedding rule_fm_emb '
+                             '(main overfitting knob for the interaction term).')
+    parser.add_argument('--fm_lr', type=float, default=None,
+                        help='Dedicated learning rate for the FM embedding param group. '
+                             'The FM embeddings start ~0 (0.01*randn) and must grow before '
+                             '<v_R,v_R\'> matters, so they converge slowly at the shared g_lr. '
+                             'A higher fm_lr (e.g. 5e-4..1e-3) speeds FM convergence without '
+                             'touching the (frozen-linear) bias group. None -> use g_lr.')
+    parser.add_argument('--num_iters_override', type=int, default=None,
+                        help='If set, overrides num_iters from the JSON config (which otherwise '
+                             'wins, since load_config replaces argparse defaults). Lets a single '
+                             'run train longer without editing the shared config file.')
     return parser.parse_args(args)
 
 def main():
@@ -113,6 +135,11 @@ def main():
     cli_save_path = args.save_path
     cli_simple_aggregation = args.simple_aggregation
     cli_learnable_rule_weight = args.learnable_rule_weight
+    cli_fm_interactions = args.fm_interactions
+    cli_fm_rank = args.fm_rank
+    cli_fm_l2 = args.fm_l2
+    cli_fm_lr = args.fm_lr
+    cli_num_iters_override = args.num_iters_override
 
     # read the given config
     if args.init_checkpoint_config:
@@ -125,6 +152,12 @@ def main():
         args.save_path = cli_save_path
     args.simple_aggregation = cli_simple_aggregation
     args.learnable_rule_weight = cli_learnable_rule_weight
+    args.fm_interactions = cli_fm_interactions
+    args.fm_rank = cli_fm_rank
+    args.fm_l2 = cli_fm_l2
+    args.fm_lr = cli_fm_lr
+    if cli_num_iters_override is not None:
+        args.num_iters = cli_num_iters_override
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:

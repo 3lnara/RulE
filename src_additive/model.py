@@ -450,6 +450,19 @@ class RulE(torch.nn.Module):
             rule_count = torch.stack(rule_count, dim=0)                 # [R, batch, entities]
             w = torch.sigmoid(self.rule_weight_logit[rule_index_t])     # [R]
             score = (w.view(-1, 1, 1) * rule_count).sum(dim=0)          # [batch, entities]
+
+            if getattr(self, 'use_fm', False):
+                # === Pairwise FM interactions over a binary co-fire basis ===
+                # sum_{R<R'} <v_R, v_R'> b_R[t] b_R'[t], with b_R[t] = 1[c_R[t]>0].
+                # Since b in {0,1} => b^2 = b, the standard FM squared-sum identity
+                # is exact: 0.5 * sum_f ( (sum_R v_Rf b_R)^2 - sum_R v_Rf^2 b_R ).
+                # Counts are no_grad constants, so gradients flow only through v_R.
+                b = (rule_count > 0).float()                  # [R, batch, entities]
+                v = self.rule_fm_emb[rule_index_t]            # [R, k]
+                S = torch.einsum('rk,rbe->kbe', v, b)         # [k, batch, entities]
+                Q = torch.einsum('rk,rbe->kbe', v * v, b)     # b^2 == b for binary basis
+                score = score + 0.5 * (S * S - Q).sum(dim=0)  # [batch, entities]
+
             score = score + self.bias.unsqueeze(0)
             mask = torch.ones_like(mask).bool()
             _mem(f"forward END (simple_aggregation)")

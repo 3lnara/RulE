@@ -407,7 +407,8 @@ class GroundTrainer(object):
         # embeddings, so this is independent of eval_compute_rule_weight below.
         # Created BEFORE the optimizer so a learnable weight joins the param group.
         use_additive = (getattr(args, 'simple_aggregation', False)
-                        or getattr(args, 'learnable_rule_weight', False))
+                        or getattr(args, 'learnable_rule_weight', False)
+                        or getattr(args, 'fm_interactions', False))
         if use_additive:
             rule_features = self.model.rule_features.to(self.device)
             rule_masks = self.model.rule_masks.to(self.device)
@@ -432,10 +433,49 @@ class GroundTrainer(object):
                              '(RulE confidence; num_rules=%d).' % init_logits.numel())
             self.model.simple_aggregation = True
 
-        optimizer = torch.optim.Adam(
-            filter(lambda p: p.requires_grad, self.model.parameters()), 
-            lr=float(args.g_lr), 
-            weight_decay=float(args.weight_decay))
+        # === Pairwise FM interactions: per-rule embedding setup ===
+        # One latent vector v_R per rule; the pairwise term is built in
+        # model.forward via the binary co-fire squared-sum identity. Created
+        # BEFORE the optimizer so it joins the parameter groups. Initialised to
+        # small noise (NOT zero): at v=0 the FM gradient vanishes (saddle), so
+        # zero-init would never learn; 0.01*randn starts FM ~= 0 yet trainable,
+        # keeping the model ~= the frozen-linear baseline at init.
+        if getattr(args, 'fm_interactions', False):
+            num_rules = self.model.rule_features.size(0)
+            k = int(getattr(args, 'fm_rank', 16))
+            self.model.rule_fm_emb = nn.Parameter(
+                0.01 * torch.randn(num_rules, k, device=self.device))
+            self.model.use_fm = True
+            logging.info('[fm] FM interactions ENABLED (rank=%d, l2=%g, num_rules=%d).'
+                         % (k, float(getattr(args, 'fm_l2', 1e-5)), num_rules))
+
+        # Build the optimizer. When FM is on, the FM embedding gets its own
+        # weight_decay (args.fm_l2) so the interaction term can be regularised
+        # independently of the rest of the (frozen-linear) model.
+        if getattr(args, 'fm_interactions', False):
+            fm_params = [self.model.rule_fm_emb]
+            fm_param_ids = {id(p) for p in fm_params}
+            other_params = [p for p in self.model.parameters()
+                            if p.requires_grad and id(p) not in fm_param_ids]
+            # FM embeddings start ~0 and grow slowly at the shared g_lr; an optional
+            # higher fm_lr lets the interaction term converge in far fewer iterations.
+            fm_lr = getattr(args, 'fm_lr', None)
+            fm_lr = float(fm_lr) if fm_lr is not None else float(args.g_lr)
+            logging.info('[fm] optimizer: base_lr=%g, fm_lr=%g, fm_l2=%g'
+                         % (float(args.g_lr), fm_lr, float(getattr(args, 'fm_l2', 1e-5))))
+            optimizer = torch.optim.Adam(
+                [
+                    {'params': other_params, 'weight_decay': float(args.weight_decay),
+                     'lr': float(args.g_lr)},
+                    {'params': fm_params, 'weight_decay': float(getattr(args, 'fm_l2', 1e-5)),
+                     'lr': fm_lr},
+                ],
+                lr=float(args.g_lr))
+        else:
+            optimizer = torch.optim.Adam(
+                filter(lambda p: p.requires_grad, self.model.parameters()), 
+                lr=float(args.g_lr), 
+                weight_decay=float(args.weight_decay))
 
 
         self.train_set.make_batches()
@@ -485,9 +525,11 @@ class GroundTrainer(object):
         
 
         logging.info('-------------------------')
-        logging.info('| Final Test MRR: {:.6f}'.format(test_mrr))
+        logging.info('| Best Valid MRR (model selection): {:.6f}'.format(test_mrr))
         logging.info('-------------------------')
 
+        # Reload the best-valid checkpoint so the final valid/test/test_kge
+        # numbers below reflect the selected model, not the last training state.
         checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
         self.model.load_state_dict(checkpoint['model'])
         
@@ -551,13 +593,14 @@ class GroundTrainer(object):
                 total_size += mask.sum().item()
             
             if (batch_id + 1) % print_every == 0:
-                
-                
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
                 
                 total_loss = 0.0
                 total_size = 0.0
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                # Intentionally NOT checkpointing here: grounding.pt is written
+                # only on a best-valid improvement in train(), so the model
+                # reloaded for the final test/test_kge eval is the best-valid one
+                # rather than whatever mid-epoch state was saved last.
         
 
     @torch.no_grad()
@@ -804,6 +847,15 @@ class GroundTrainer(object):
             os.path.join(args.save_path, 'g_rule_embedding'), 
             g_rule_embedding
         )
+
+        # Persist the FM per-rule embedding for offline interaction analysis
+        # (also present in grounding.pt as a Parameter; this is a convenience
+        # dump mirroring g_rule_embedding).
+        if getattr(self.model, 'use_fm', False):
+            np.save(
+                os.path.join(args.save_path, 'rule_fm_emb'),
+                self.model.rule_fm_emb.detach().cpu().numpy()
+            )
 
 
 def log_metrics(mode, step, metrics):
