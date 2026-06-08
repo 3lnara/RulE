@@ -451,6 +451,33 @@ class RulE(torch.nn.Module):
             w = torch.sigmoid(self.rule_weight_logit[rule_index_t])     # [R]
             score = (w.view(-1, 1, 1) * rule_count).sum(dim=0)          # [batch, entities]
 
+            if getattr(self, 'use_nam', False):
+                # === NAM residual: sum_R f_R(count_R[t]) ===
+                # f_R is a shared shape-net MLP conditioned on a small learnable per-rule
+                # embedding z_R (dim nam_dim). Input features phi = [count, log1p(count)]
+                # capture the saturation shape; z_R specialises the curve per rule.
+                # The shape-net final layer is zero-inited (set in trainer), so nam
+                # contributes 0 at iteration 0 -> run starts at the frozen-linear baseline.
+                # f_R(0)=0 is enforced by multiplying by fired=1[count>0], so non-firing
+                # rules contribute exactly 0 (attribution stays clean).
+                #
+                # Memory note: phi/z are [R, batch, entities, *] -- same scale as FM's
+                # [R, batch, entities] tensor that already fits in VRAM for UMLS/WN18RR.
+                # For very large datasets with many fired rules, chunk over R if needed.
+                fired = (rule_count > 0).float()                        # [R, batch, entities]
+                phi = torch.stack(
+                    [rule_count, torch.log1p(rule_count)], dim=-1
+                )                                                        # [R, batch, entities, 2]
+                R = rule_index_t.size(0)
+                z = self.nam_emb[rule_index_t]                          # [R, nam_dim]
+                z_exp = z.view(R, 1, 1, -1).expand(
+                    R, phi.size(1), phi.size(2), z.size(-1)
+                )                                                        # [R, batch, entities, nam_dim]
+                nam_inp = torch.cat([phi, z_exp], dim=-1)               # [R, batch, entities, 2+nam_dim]
+                nam_out = self.nam_net(nam_inp).squeeze(-1)             # [R, batch, entities]
+                score = score + (nam_out * fired).sum(dim=0)            # [batch, entities]
+                _mem(f"forward NAM residual R={R}")
+
             if getattr(self, 'use_fm', False):
                 # === Pairwise FM interactions over a binary co-fire basis ===
                 # sum_{R<R'} <v_R, v_R'> b_R[t] b_R'[t], with b_R[t] = 1[c_R[t]>0].

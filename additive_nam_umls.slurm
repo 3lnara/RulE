@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=additive_fm_umls
+#SBATCH --job-name=additive_nam_umls
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -32,12 +32,11 @@ echo "PyTorch : $(python3 -c 'import torch; print(torch.__version__, "| CUDA:", 
 echo ""
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Pre-trained KGE + rule embeddings (same checkpoint used by the GAT runs).
+SEED=42
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
+SAVE_PATH="$HOME/RulE/outputs/additive_umls_nam"
 
-# Output directory for this frozen-linear + FM run.
-SAVE_PATH="$HOME/RulE/outputs/additive_umls_fm_lr"
-
+echo "Seed                   : ${SEED}"
 echo "Pre-trained checkpoint : ${PRETRAIN_CHECKPOINT}"
 echo "Save path              : ${SAVE_PATH}"
 echo "Started                : $(date '+%Y-%m-%d %H:%M:%S')"
@@ -45,27 +44,39 @@ echo ""
 
 if [ ! -e "${PRETRAIN_CHECKPOINT}" ]; then
     echo "ERROR: Pre-trained checkpoint not found at ${PRETRAIN_CHECKPOINT}."
-    echo "Run the full comparison job first or update PRETRAIN_CHECKPOINT in this script."
     exit 1
 fi
 
 mkdir -p "${SAVE_PATH}"
 
-# ── Run frozen-linear + FM interactions (headline interdependency experiment) ──
-# score[t] = sum_R conf_R * count_R[t]  (frozen linear backbone)
-#          + sum_{R<R'} <v_R, v_R'> * 1[c_R[t]>0] * 1[c_R'[t]>0]  (learnable FM)
-#          + bias
-# --simple_aggregation : frozen-linear backbone (per-rule weight frozen at RulE conf).
-# --fm_interactions    : add the learnable pairwise FM term (binary co-fire basis).
-# --fm_rank / --fm_l2  : FM latent dim and FM-only L2 (overfitting knob).
-# --fm_lr              : dedicated (higher) LR for the FM embeddings. They start ~0 and
-#                        converge slowly at the shared g_lr=1e-4, so 1e-3 (10x) lets the
-#                        interaction term actually saturate within the iteration budget.
-# --num_iters_override : the prior 20-iter run was still climbing at the last iteration
-#                        (valid MRR monotonically rising, never plateaued) -> train longer
-#                        and let best-valid model selection pick the peak.
-# With the linear part frozen, any gain over the --simple_aggregation baseline is
-# attributable purely to rule interactions.
+# ── Run NAM + FM (headline interpretable run) ──────────────────────────────────
+#
+# Score decomposition (all terms additive -> clean rule attribution):
+#   score[t] = bias
+#            + sum_R  w_R * count_R[t]               (frozen RulE-confidence backbone)
+#            + sum_R  f_R(count_R[t])                (NAM residual; f_R(0)=0 by mask)
+#            + sum_{R<R'} <v_R,v_R'> * 1[c_R>0]*1[c_R'>0]  (FM pairwise)
+#
+# Key flags:
+#   --simple_aggregation   frozen-linear backbone (w_R = RulE confidence)
+#   --fm_interactions      pairwise FM term (binary co-fire basis)
+#   --fm_rank 16           FM latent dimension
+#   --fm_l2 1e-5           FM-only weight decay
+#   --fm_lr 1e-3           FM dedicated LR (10x base; FM starts ~0 -> needs boost)
+#   --nam                  NAM residual shape functions
+#   --nam_dim 16           dim of per-rule conditioning embedding z_R
+#   --nam_hidden 64        hidden width of the shared shape-net
+#   --nam_lr 1e-3          NAM dedicated LR (same rationale as FM)
+#   --nam_l2 1e-5          NAM-only weight decay
+#   --alpha_sweep          pick best KGE-fusion alpha on VALID set, report test_kge
+#   --early_stop_patience 8  stop if no valid MRR improvement for 8 iters
+#   --num_iters_override 60  hard cap; early stopping will fire first in practice
+#
+# Ablation variants (toggle flags on/off):
+#   FM-only:  drop  --nam --nam_dim --nam_hidden --nam_lr --nam_l2
+#   NAM-only: drop  --fm_interactions --fm_rank --fm_l2 --fm_lr
+#   Baseline: drop both FM and NAM blocks (keep --simple_aggregation only)
+
 TRAIN_START=$(date +%s)
 
 cd "$HOME/RulE/src_additive"
@@ -75,15 +86,16 @@ python3 -u main.py \
     --skip_pretrain \
     --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
     --simple_aggregation \
-    --fm_interactions \
-    --fm_rank 32 \
-    --fm_l2 1e-5 \
-    --fm_lr 1e-3 \
+    --nam \
+    --nam_dim 16 \
+    --nam_hidden 64 \
+    --nam_lr 3e-4 \
+    --nam_l2 1e-5 \
     --alpha_sweep \
     --alpha_grid "0,1,2,4,6,8,10,12,16,24" \
     --early_stop_patience 8 \
-    --seed 42 \
     --num_iters_override 60 \
+    --seed "${SEED}" \
     --save_path "${SAVE_PATH}"
 
 TRAIN_RC=$?

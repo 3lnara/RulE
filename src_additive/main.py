@@ -125,6 +125,45 @@ def parse_args(args=None):
                         help='If set, overrides num_iters from the JSON config (which otherwise '
                              'wins, since load_config replaces argparse defaults). Lets a single '
                              'run train longer without editing the shared config file.')
+
+    # === NAM (Neural Additive Model) residual shape functions ===
+    parser.add_argument('--nam', action='store_true', default=False,
+                        help='Add a NAM residual: score[t] += sum_R f_R(count_R[t]) where '
+                             'f_R is a shared shape-net conditioned on a small learnable per-rule '
+                             'embedding z_R. The shape-net last layer is zero-initialized so the '
+                             'run starts at the frozen-linear baseline and learns a nonlinear '
+                             'correction. f_R(0)=0 by masking (non-firing rules contribute 0). '
+                             'Implies --simple_aggregation.')
+    parser.add_argument('--nam_dim', type=int, default=16,
+                        help='Dimension of the learnable per-rule embedding z_R used to '
+                             'condition the shared shape-net (specialises f_R per rule).')
+    parser.add_argument('--nam_hidden', type=int, default=64,
+                        help='Hidden width of the shared shape-net MLP.')
+    parser.add_argument('--nam_lr', type=float, default=None,
+                        help='Dedicated LR for NAM params (nam_net + nam_emb). '
+                             'Like FM they start ~0 and need a higher LR to converge. '
+                             'None -> fm_lr if set, else g_lr.')
+    parser.add_argument('--nam_l2', type=float, default=1e-5,
+                        help='Weight decay applied only to NAM params (independent '
+                             'regularisation knob for the shape-net).')
+
+    # === Validation-selected alpha sweep (KGE fusion weight) ===
+    parser.add_argument('--alpha_sweep', action='store_true', default=False,
+                        help='After best-valid reload, sweep --alpha_grid values on the valid '
+                             'split (KGE-fused MRR) to pick best_alpha, then report test/test_kge '
+                             'at best_alpha. Avoids tuning alpha on the test set.')
+    parser.add_argument('--alpha_grid', type=str, default='0,0.5,1,1.5,2,3,4,6,8',
+                        help='Comma-separated alpha values to try during --alpha_sweep.')
+
+    # === Early stopping ===
+    parser.add_argument('--early_stop_patience', type=int, default=0,
+                        help='Stop training if valid MRR has not improved by more than '
+                             '--early_stop_min_delta for this many consecutive iterations. '
+                             '0 = disabled (train for the full num_iters).')
+    parser.add_argument('--early_stop_min_delta', type=float, default=0.0,
+                        help='Minimum improvement in valid MRR to count as progress for '
+                             'early stopping purposes.')
+
     return parser.parse_args(args)
 
 def main():
@@ -140,6 +179,15 @@ def main():
     cli_fm_l2 = args.fm_l2
     cli_fm_lr = args.fm_lr
     cli_num_iters_override = args.num_iters_override
+    cli_nam = args.nam
+    cli_nam_dim = args.nam_dim
+    cli_nam_hidden = args.nam_hidden
+    cli_nam_lr = args.nam_lr
+    cli_nam_l2 = args.nam_l2
+    cli_alpha_sweep = args.alpha_sweep
+    cli_alpha_grid = args.alpha_grid
+    cli_early_stop_patience = args.early_stop_patience
+    cli_early_stop_min_delta = args.early_stop_min_delta
 
     # read the given config
     if args.init_checkpoint_config:
@@ -158,6 +206,15 @@ def main():
     args.fm_lr = cli_fm_lr
     if cli_num_iters_override is not None:
         args.num_iters = cli_num_iters_override
+    args.nam = cli_nam
+    args.nam_dim = cli_nam_dim
+    args.nam_hidden = cli_nam_hidden
+    args.nam_lr = cli_nam_lr
+    args.nam_l2 = cli_nam_l2
+    args.alpha_sweep = cli_alpha_sweep
+    args.alpha_grid = cli_alpha_grid
+    args.early_stop_patience = cli_early_stop_patience
+    args.early_stop_min_delta = cli_early_stop_min_delta
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:

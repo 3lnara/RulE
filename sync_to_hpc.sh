@@ -178,6 +178,8 @@ run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/feature_validity_family.slurm" \
   "${SCRIPT_DIR}/additive_lever1_umls.slurm" \
   "${SCRIPT_DIR}/additive_fm_umls.slurm" \
+  "${SCRIPT_DIR}/additive_nam_fm_umls.slurm" \
+  "${SCRIPT_DIR}/additive_nam_umls.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr_numnorm_rel.slurm" \
