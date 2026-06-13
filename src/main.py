@@ -84,6 +84,12 @@ def parse_args(args=None):
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
     parser.add_argument('--num_iters', default=20, type=int)
+    parser.add_argument('--empty_cache_every', default=50, type=int,
+                        help='Call torch.cuda.empty_cache() every N grounding batches '
+                             'instead of every batch. Per-batch empty_cache() forces the '
+                             'CUDA allocator to release/reacquire blocks (synchronizing, '
+                             'slow). 0 disables it entirely; larger N is faster but raises '
+                             'peak memory. Numerically irrelevant.')
 
     parser.add_argument('--skip_pretrain', action='store_true', default=False,
                         help='Skip pre-training and load from an existing checkpoint')
@@ -141,6 +147,7 @@ def main():
     cli_attn_dim = args.attn_dim
     cli_gat_variant = args.gat_variant
     cli_checkpoint_grounding = args.checkpoint_grounding
+    cli_empty_cache_every = args.empty_cache_every
 
 
     # read the given config
@@ -159,6 +166,7 @@ def main():
     args.attn_dim = cli_attn_dim
     args.gat_variant = cli_gat_variant
     args.checkpoint_grounding = cli_checkpoint_grounding
+    args.empty_cache_every = cli_empty_cache_every
     if args.save_path is None:
         args.save_path = os.path.join('../outputs', datetime.now().strftime('%Y%m-%d%H-%M%S'))
     

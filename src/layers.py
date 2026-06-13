@@ -171,6 +171,18 @@ class GroundingGAT(nn.Module):
         # countering the GAT attention-collapse pathology.
         self.attn_entropy_penalty = None
 
+        # Per-forward cache of the shared entity->attn_dim projections. During
+        # grounding, entity_emb is frozen and W_src/W_dst are shared across every
+        # rule and hop, so F.linear(entity_emb, W_src.weight) is identical on
+        # every compute_edge_attention call within a forward pass. The GAT loops
+        # over up to ~400 rules x up to 5 hops per batch, so without this cache
+        # the [num_entities, attn_dim] matmul (40,943 x 1,000 -> 128 on WN18RR)
+        # is recomputed ~1,000 times per batch. precompute_entity_projections()
+        # populates these once; compute_edge_attention() reuses them, making the
+        # result bit-identical while running the matmul exactly once.
+        self._cached_all_src_proj = None
+        self._cached_all_dst_proj = None
+
         self._reset_parameters()
     def set_frozen_confidences(self, confidence_tensor):
         """
@@ -196,6 +208,32 @@ class GroundingGAT(nn.Module):
         nn.init.xavier_uniform_(self.conf_proj.weight)
         nn.init.zeros_(self.conf_proj.bias)
 
+    def precompute_entity_projections(self, entity_emb):
+        """
+        Precompute the shared entity->attn_dim projections once per forward.
+
+        entity_emb is frozen during grounding and W_src/W_dst are shared across
+        every rule and every hop, so F.linear(entity_emb, W_*.weight) is the same
+        on every compute_edge_attention call within a forward. Caching it turns
+        the >1,000-per-batch [num_entities, attn_dim] matmul (e.g. 40,943 x 1,000
+        -> 128 on WN18RR) into a single matmul. Results are bit-identical and the
+        cached tensors stay in the autograd graph (grad flows to W_src/W_dst), so
+        gradients remain exact. compute_edge_attention reads these via `self`,
+        including under gradient checkpointing -- the same access pattern already
+        used for self.W_src.weight there -- so the matmul is also not recomputed
+        in backward.
+        """
+        self._cached_all_src_proj = F.linear(entity_emb, self.W_src.weight)
+        if self.variant == 'baseline':
+            self._cached_all_dst_proj = F.linear(entity_emb, self.W_dst.weight)
+        else:
+            self._cached_all_dst_proj = None
+
+    def clear_entity_projection_cache(self):
+        """Drop the cached projections (release the graph they hold)."""
+        self._cached_all_src_proj = None
+        self._cached_all_dst_proj = None
+
     def compute_edge_attention(self, entity_emb, node_in, node_out, rel_emb, num_nodes,
                                rule_emb=None):
         """
@@ -219,11 +257,22 @@ class GroundingGAT(nn.Module):
         # This avoids creating [num_edges, entity_dim] copies that would be stored
         # for the backward pass; backward of W_src/W_dst uses entity_emb which is
         # already resident in GPU memory.
-        all_src_proj = F.linear(entity_emb, self.W_src.weight)  # [num_entities, attn_dim]
+        #
+        # The full [num_entities, attn_dim] projection is identical for every rule
+        # and hop in a forward (entity_emb frozen, W_src/W_dst shared), so reuse
+        # the per-forward cache populated by precompute_entity_projections() when
+        # present. The fallback recomputes it for standalone calls.
+        if self._cached_all_src_proj is not None:
+            all_src_proj = self._cached_all_src_proj
+        else:
+            all_src_proj = F.linear(entity_emb, self.W_src.weight)  # [num_entities, attn_dim]
         src_proj = all_src_proj[node_in]   # [num_edges, attn_dim]
 
         if self.variant == 'baseline':
-            all_dst_proj = F.linear(entity_emb, self.W_dst.weight)  # [num_entities, attn_dim]
+            if self._cached_all_dst_proj is not None:
+                all_dst_proj = self._cached_all_dst_proj
+            else:
+                all_dst_proj = F.linear(entity_emb, self.W_dst.weight)  # [num_entities, attn_dim]
             dst_proj = all_dst_proj[node_out]  # [num_edges, attn_dim]
             proj = src_proj + dst_proj + self.W_rel(rel_emb)
         else:

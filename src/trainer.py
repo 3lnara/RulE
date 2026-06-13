@@ -501,6 +501,7 @@ class GroundTrainer(object):
         # Diagnostic flags (read once at top so the inner loop is cheap).
         attn_entropy_weight = float(getattr(args, 'attn_entropy_weight', 0.0))
         eval_every = int(getattr(args, 'eval_every_batches', 0))
+        empty_cache_every = int(getattr(args, 'empty_cache_every', 50))
         do_per_batch_eval = (iter_idx == 0 and eval_every > 0)
         if do_per_batch_eval:
             logging.info(f'[diagnostic] iter 1: validating every {eval_every} batches')
@@ -563,7 +564,12 @@ class GroundTrainer(object):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
-                torch.cuda.empty_cache()
+                # Per-batch empty_cache() forces the CUDA allocator to release and
+                # reacquire blocks (synchronizing, slow). Throttle it; this has no
+                # effect on numerics. 0 disables; larger N is faster but raises peak
+                # memory.
+                if empty_cache_every > 0 and (batch_id + 1) % empty_cache_every == 0:
+                    torch.cuda.empty_cache()
 
                 total_loss += loss.item()
                 total_size += mask.sum().item()

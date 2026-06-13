@@ -360,6 +360,13 @@ class RulE(torch.nn.Module):
         entity_emb = self.entity_embedding.weight
         relation_emb = self.relation_embedding.weight
 
+        # Precompute the shared entity->attn projections once for this batch.
+        # They are identical for every rule and hop (entity_emb frozen,
+        # W_src/W_dst shared), so this collapses ~1,000 redundant
+        # [num_entities, attn_dim] matmuls per batch into a single one.
+        # Bit-identical results, exact gradients (grad still flows to W_src/W_dst).
+        self.grounding_gat.precompute_entity_projections(entity_emb)
+
         score = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
 

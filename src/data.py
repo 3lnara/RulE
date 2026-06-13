@@ -379,6 +379,13 @@ class KnowledgeGraph(object):
 
             self.relation2outdegree[r] = torch.LongTensor(self.relation2outdegree[r])
 
+        # Lazy per-relation cache of the [2, num_edges] adjacency index on the
+        # compute device. During grounding the same edge-index tensors are read on
+        # every hop of every rule (~1,000 times per batch on WN18RR); without a
+        # cache each access re-copied them host->device. Populated on first use by
+        # get_adjacency_on_device(); total size is ~2*num_edges longs (a few MB).
+        self._adjacency_device_cache = {}
+
         print("Data loading | DONE!")
 
     def encode_hr(self, h, r):
@@ -407,6 +414,30 @@ class KnowledgeGraph(object):
         value = value[mask]
         return [index, value]
 
+    def get_adjacency_on_device(self, relation, device):
+        """
+        Return (node_in, node_out) edge-index tensors for `relation` on `device`.
+
+        relation2adjacency[relation][0] is a [2, num_edges] LongTensor built once on
+        CPU (row 0 = node_out / t, row 1 = node_in / h). It is read on every hop of
+        every rule during grounding, so the device copy is cached and reused instead
+        of being re-transferred host->device on each call. Edge ordering is
+        unchanged, so edge-position indices such as edges_to_remove stay valid.
+        """
+        index = self.relation2adjacency[relation][0]
+        if device.type != "cuda":
+            return index[1], index[0]
+        # Normalise 'cuda' -> 'cuda:N' so the cached tensor's indexed device always
+        # compares equal on subsequent hits (a bare 'cuda' would otherwise miss).
+        if device.index is None:
+            device = torch.device("cuda", torch.cuda.current_device())
+        entry = self._adjacency_device_cache.get(relation)
+        if entry is None or entry[0].device != device:
+            gpu_index = index.to(device)
+            entry = (gpu_index[1], gpu_index[0])   # (node_in = h, node_out = t)
+            self._adjacency_device_cache[relation] = entry
+        return entry
+
     def grounding(self, h, r, rule, edges_to_remove):
         device = h.device
         with torch.no_grad():
@@ -422,11 +453,7 @@ class KnowledgeGraph(object):
 
     def propagate(self, x, relation, edges_to_remove=None):
         device = x.device
-        node_in = self.relation2adjacency[relation][0][1] # h
-        node_out = self.relation2adjacency[relation][0][0] # t
-        if device.type == "cuda":
-            node_in = node_in.cuda(device)
-            node_out = node_out.cuda(device)
+        node_in, node_out = self.get_adjacency_on_device(relation, device)  # (h, t)
 
         message = x[node_in]
         E, B, D = message.size()
@@ -490,11 +517,7 @@ class KnowledgeGraph(object):
                               edges_to_remove=None, chunk_size=64, rule_emb=None,
                               checkpoint_attn=False):
         device = x.device
-        node_in  = self.relation2adjacency[relation][0][1]
-        node_out = self.relation2adjacency[relation][0][0]
-        if device.type == "cuda":
-            node_in  = node_in.cuda(device)
-            node_out = node_out.cuda(device)
+        node_in, node_out = self.get_adjacency_on_device(relation, device)  # (h, t)
 
         num_relations = relation_emb.size(0) - 1
         r_idx  = relation % num_relations
