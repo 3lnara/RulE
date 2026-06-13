@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=gat_grounding_umls_rule_attn
+#SBATCH --job-name=gat_grounding_wn18rr_rule_attn
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=3:00:00
+#SBATCH --constraint=v100
+#SBATCH --time=48:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -10,11 +11,7 @@
 #SBATCH --error=%x_%j.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=e.yerbolatova@student.tue.nl
-
-# ── GPU info ───────────────────────────────────────────────────────────────────
-# echo "=== GPU info ==="
-# nvidia-smi
-# echo "================"
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ── Python environment ─────────────────────────────────────────────────────────
 module purge
@@ -40,10 +37,31 @@ echo ""
 # Option A: drop W_dst AND replace the shared attn_vec with a rule-conditioned
 # attn_from_rule(rule_emb). Per-rule scoring vector -> different rules see
 # different per-edge attention rankings, even on the same edge set.
-PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
+#
+# WN18RR-specific differences vs the UMLS counterpart:
+#   - hidden_dim=500 (vs 2000), so entity_dim=1000, relation_dim=500
+#   - g_lr=0.005, alpha=1.0, smoothing=0.3 (from config)
+#   - --eval_every_batches 0: per-batch eval disabled (WN18RR full eval is
+#     expensive at 40,943 entities x ~3k valid queries; per-iter eval suffices)
+#
+# ── 16 GB OOM handling ──────────────────────────────────────────────────────────
+# The rule_attn forward loops over EVERY rule for the query relation (up to 408
+# rules on WN18RR) and each rule body is up to 5 hops, so one batch accumulates
+# ~1,400 per-hop attention graphs before a single backward(). On a 16 GB V100 the
+# default attn_dim=128 + g_batch_size=32 OOMs inside compute_edge_attention
+# (proj = [num_edges, attn_dim], up to ~35k edges for _hypernym).
+#
+# Fix used here: --checkpoint_grounding gradient-checkpoints the GAT attention so
+# its [num_edges, attn_dim] activations are freed after the forward and recomputed
+# in backward (exact gradients, ~one extra forward per step). This keeps the full
+# attn_dim=128 capacity and fits comfortably in 16 GB. g_batch_size is set to 16
+# in wn18rr_gat_hpc.json for extra headroom; with checkpointing you can likely
+# raise it back to 32 (check nvidia-smi). NOTE: checkpointing disables the
+# attention-entropy regulariser (kept at 0 here), which is fine for this variant.
+PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/wn18rr_original/checkpoint"
 
 # Output directory for this GAT grounding run
-SAVE_PATH="$HOME/RulE/outputs/gat_umls_rule_attn"
+SAVE_PATH="$HOME/RulE/outputs/gat_wn18rr_rule_attn"
 
 echo "Pre-trained checkpoint : ${PRETRAIN_CHECKPOINT}"
 echo "Save path              : ${SAVE_PATH}"
@@ -52,28 +70,27 @@ echo ""
 
 if [ ! -e "${PRETRAIN_CHECKPOINT}" ]; then
     echo "ERROR: Pre-trained checkpoint not found at ${PRETRAIN_CHECKPOINT}."
-    echo "Run the full comparison job first or update PRETRAIN_CHECKPOINT in this script."
+    echo "Run rule_original_wn18rr.slurm first or update PRETRAIN_CHECKPOINT in this script."
     exit 1
 fi
 
 mkdir -p "${SAVE_PATH}"
 
 # ── Run GAT grounding (rule_attn variant) ──────────────────────────────────────
-# Same flags as gat_grounding_only_umls_entropy.slurm except for --gat_variant.
 TRAIN_START=$(date +%s)
 
 cd "$HOME/RulE/src"
 python3 -u main.py \
-    --init_checkpoint_config "$HOME/RulE/config/umls_hpc.json" \
+    --init_checkpoint_config "$HOME/RulE/config/wn18rr_gat_hpc.json" \
     --skip_pretrain \
     --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
     --use_rule_confidence_variant_a \
     --gat_variant rule_attn \
-    --attn_dim 64 \
+    --attn_dim 128 \
+    --checkpoint_grounding \
     --attn_entropy_weight 0 \
-    --eval_every_batches 50 \
+    --eval_every_batches 0 \
     --save_path "${SAVE_PATH}"
-    # --freeze_conf_proj
 
 TRAIN_RC=$?
 TRAIN_END=$(date +%s)
