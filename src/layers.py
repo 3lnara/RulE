@@ -124,7 +124,7 @@ class GroundingGAT(nn.Module):
     _VALID_VARIANTS = ('baseline', 'no_dst', 'rule_attn')
 
     def __init__(self, entity_dim, relation_dim, attn_dim=128, rule_dim=None,
-                 variant='baseline', negative_slope=0.2):
+                 variant='baseline', negative_slope=0.2, checkpoint_attention=False):
         super(GroundingGAT, self).__init__()
 
         if attn_dim is None:
@@ -140,6 +140,13 @@ class GroundingGAT(nn.Module):
         self.variant = variant
         self.attn_dim = attn_dim
         self.negative_slope = negative_slope
+        # When True, compute_edge_attention is run inside a gradient checkpoint
+        # (see GraphData.propagate_with_attention) so its [num_edges, attn_dim]
+        # activations are freed after the forward and recomputed in backward.
+        # This lets large graphs (e.g. WN18RR) fit at attn_dim=128 on a 16 GB GPU.
+        # It is incompatible with the attention-entropy regulariser, so the
+        # entropy accumulation below is skipped whenever this flag is set.
+        self.checkpoint_attention = checkpoint_attention
 
         self.W_src = nn.Linear(entity_dim, attn_dim, bias=False)
         # W_dst only exists in the baseline variant.
@@ -243,12 +250,16 @@ class GroundingGAT(nn.Module):
         # Accumulate Σ a*log(a) across all hops in this forward pass. Stays in
         # the graph so the regulariser flows gradients into W_src/W_dst/W_rel/
         # attn_vec when the trainer adds lambda * attn_entropy_penalty to the loss.
-        eps = 1e-9
-        penalty = (edge_attn * (edge_attn + eps).log()).sum()
-        if self.attn_entropy_penalty is None:
-            self.attn_entropy_penalty = penalty
-        else:
-            self.attn_entropy_penalty = self.attn_entropy_penalty + penalty
+        # Skip when checkpointing: the entropy term would reference edge_attn's
+        # graph, which the checkpoint is meant to free, and the accumulation
+        # would also double-count when this function re-runs during backward.
+        if not self.checkpoint_attention:
+            eps = 1e-9
+            penalty = (edge_attn * (edge_attn + eps).log()).sum()
+            if self.attn_entropy_penalty is None:
+                self.attn_entropy_penalty = penalty
+            else:
+                self.attn_entropy_penalty = self.attn_entropy_penalty + penalty
 
         return edge_attn
 

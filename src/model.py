@@ -7,7 +7,7 @@ from layers import MLP, FuncToNodeSum, GroundingGAT
 from torch.nn.utils.rnn import pad_sequence
 
 class RulE(torch.nn.Module):
-    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, attn_dim=128, gat_variant='baseline'):
+    def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset, attn_dim=128, gat_variant='baseline', checkpoint_grounding=False):
         super(RulE, self).__init__()
         self.graph = graph
         self.device = device
@@ -34,6 +34,7 @@ class RulE(torch.nn.Module):
             attn_dim=attn_dim,
             rule_dim=self.hidden_dim,
             variant=gat_variant,
+            checkpoint_attention=checkpoint_grounding,
         )
 
         self.bias = torch.nn.parameter.Parameter(torch.zeros(self.num_entities))
@@ -377,6 +378,7 @@ class RulE(torch.nn.Module):
                 entity_emb, relation_emb,
                 edges_to_remove,
                 rule_emb=rule_identity_emb,
+                checkpoint_attn=self.grounding_gat.checkpoint_attention,
             )
 
             rule_emb_vec = self.rules_weight_emb[index]

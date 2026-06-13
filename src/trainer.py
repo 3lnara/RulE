@@ -431,6 +431,14 @@ class GroundTrainer(object):
             self.model.grounding_gat.set_frozen_confidences(scalar_confidences)
         
         logging.info('>>>>> RulE: Grounding-Training')
+
+        if getattr(args, 'checkpoint_grounding', False):
+            logging.info('[memory] checkpoint_grounding=True: GAT edge-attention is recomputed '
+                         'in backward (exact gradients, lower memory).')
+            if float(getattr(args, 'attn_entropy_weight', 0.0)) > 0.0:
+                logging.warning('attn_entropy_weight>0 is IGNORED while checkpoint_grounding=True '
+                                '(the entropy term needs the attention graph that checkpointing '
+                                'frees). Disable checkpointing to use attention-entropy.')
         
 
         best_valid_mrr = 0.0 

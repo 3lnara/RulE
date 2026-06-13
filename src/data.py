@@ -447,7 +447,7 @@ class KnowledgeGraph(object):
         return x
 
     def grounding_with_attention(self, h, r, rule, attn_fn, entity_emb, relation_emb,
-                                 edges_to_remove, rule_emb=None):
+                                 edges_to_remove, rule_emb=None, checkpoint_attn=False):
         """
         Attention-weighted grounding: same path structure as grounding(), but
         each hop uses GAT edge attention to weight messages.
@@ -480,13 +480,15 @@ class KnowledgeGraph(object):
             etr = edges_to_remove if r_body == r else None
             x, edge_attn, node_in, node_out = self.propagate_with_attention(
                 x, r_body, attn_fn, entity_emb, relation_emb, etr, rule_emb=rule_emb,
+                checkpoint_attn=checkpoint_attn,
             )
             hop_attentions.append((edge_attn, node_in, node_out))
 
         return x.squeeze(-1).transpose(0, 1), hop_attentions
 
     def propagate_with_attention(self, x, relation, attn_fn, entity_emb, relation_emb,
-                              edges_to_remove=None, chunk_size=64, rule_emb=None):
+                              edges_to_remove=None, chunk_size=64, rule_emb=None,
+                              checkpoint_attn=False):
         device = x.device
         node_in  = self.relation2adjacency[relation][0][1]
         node_out = self.relation2adjacency[relation][0][0]
@@ -499,6 +501,51 @@ class KnowledgeGraph(object):
         r_flag = (-1) ** (relation // num_relations)
         rel_emb = relation_emb[r_idx] * r_flag
 
+        B         = x.size(1)
+        num_nodes = x.size(0)
+        use_ckpt  = torch.is_grad_enabled()
+        empty_etr = torch.empty(0, dtype=torch.long, device=device)
+
+        # ── Recompute-attention-in-backward path. ─────────────────────────────
+        # When checkpoint_attn is set and we are building a graph, fold the whole
+        # attention computation (compute_edge_attention) into the checkpointed
+        # region so its [num_edges, attn_dim] activations are freed after the
+        # forward and recomputed during backward. Gradients are exact; this is
+        # what makes WN18RR (40,943 entities) fit at attn_dim=128 on a 16 GB GPU.
+        # Note: entropy accumulation is skipped inside compute_edge_attention
+        # under this flag, so edge_attn carries no entropy side-effect here.
+        if checkpoint_attn and use_ckpt:
+            def _attn_chunk_fn(entity_emb_d, rel_emb_, rule_emb_, xc, etr_c):
+                ea = attn_fn(entity_emb_d, node_in, node_out, rel_emb_, num_nodes,
+                             rule_emb=rule_emb_)
+                msg = xc[node_in]
+                E, c, D = msg.size()
+                if etr_c.numel() > 0:
+                    msg      = msg.clone()
+                    msg_flat = msg.view(-1, D)
+                    bias     = torch.arange(c, device=msg.device)
+                    msg_flat[etr_c * c + bias] = 0
+                    msg = msg_flat.view(E, c, D)
+                weighted = ea.unsqueeze(-1).unsqueeze(-1) * msg
+                return scatter(weighted, node_out, dim=0, dim_size=num_nodes)
+
+            outputs = []
+            for start in range(0, B, chunk_size):
+                xc    = x[:, start:start + chunk_size, :]
+                etr_c = edges_to_remove[start:start + chunk_size] \
+                        if edges_to_remove is not None else empty_etr
+                out = torch.utils.checkpoint.checkpoint(
+                    _attn_chunk_fn, entity_emb.detach(), rel_emb, rule_emb, xc, etr_c,
+                    use_reentrant=False,
+                )
+                outputs.append(out)
+            output = torch.cat(outputs, dim=1)
+            # edge_attn lives inside the checkpoint and is not materialised here.
+            # hop_attentions is only consumed by the return_attention eval path
+            # (which runs under no_grad, so use_ckpt is False), so returning None
+            # for the per-hop attention during training is safe.
+            return output, None, node_in, node_out
+
         # ── Compute edge attention once (no batch dependence). ────────────────
         # This call also accumulates attn_entropy_penalty — happens exactly once
         # per hop regardless of chunk_size, so no double-counting. rule_emb is
@@ -506,10 +553,6 @@ class KnowledgeGraph(object):
         edge_attn = attn_fn(entity_emb.detach(), node_in, node_out, rel_emb, x.size(0),
                             rule_emb=rule_emb)
         # edge_attn: [num_edges]
-
-        B         = x.size(1)
-        num_nodes = x.size(0)
-        use_ckpt  = torch.is_grad_enabled()
 
         # ── _chunk_fn: message-pass one batch slice. ──────────────────────────
         # All three arguments are tensors so torch.utils.checkpoint is happy.
@@ -529,7 +572,6 @@ class KnowledgeGraph(object):
             weighted = ea.unsqueeze(-1).unsqueeze(-1) * msg   # [E, c, 1]
             return scatter(weighted, node_out, dim=0, dim_size=num_nodes)  # [num_nodes, c, 1]
 
-        empty_etr = torch.empty(0, dtype=torch.long, device=device)
         outputs   = []
         for start in range(0, B, chunk_size):
             xc    = x[:, start:start + chunk_size, :]

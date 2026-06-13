@@ -111,6 +111,13 @@ def parse_args(args=None):
     parser.add_argument('--attn_dim', default=128, type=int,
                         help='Attention hidden dimension for GroundingGAT. '
                              'Default 128. Use 64 on small graphs (UMLS) to reduce overfitting.')
+    parser.add_argument('--checkpoint_grounding', action='store_true', default=False,
+                        help='Gradient-checkpoint the GAT edge-attention computation so its '
+                             '[num_edges, attn_dim] activations are recomputed in backward '
+                             'instead of stored. Cuts grounding memory dramatically (lets large '
+                             'graphs like WN18RR fit at attn_dim=128 on a 16 GB GPU) at the cost '
+                             'of ~one extra forward per step. Gradients are exact. Disables the '
+                             'attention-entropy regulariser (incompatible by construction).')
     parser.add_argument('--gat_variant', default='baseline', type=str,
                         choices=['baseline', 'no_dst', 'rule_attn'],
                         help='GAT architecture for rule grounding. '
@@ -133,6 +140,7 @@ def main():
     cli_use_rule_confidence_variant_a = args.use_rule_confidence_variant_a
     cli_attn_dim = args.attn_dim
     cli_gat_variant = args.gat_variant
+    cli_checkpoint_grounding = args.checkpoint_grounding
 
 
     # read the given config
@@ -150,6 +158,7 @@ def main():
     args.use_rule_confidence_variant_a = cli_use_rule_confidence_variant_a
     args.attn_dim = cli_attn_dim
     args.gat_variant = cli_gat_variant
+    args.checkpoint_grounding = cli_checkpoint_grounding
     if args.save_path is None:
         args.save_path = os.path.join('../outputs', datetime.now().strftime('%Y%m-%d%H-%M%S'))
     
@@ -177,7 +186,7 @@ def main():
     else:
         device = torch.device('cpu')
 
-    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path, attn_dim=args.attn_dim, gat_variant=args.gat_variant)
+    RulE_model = RulE(graph, args.p_norm, args.mlp_rule_dim, args.gamma_fact, args.gamma_rule, args.hidden_dim, device, args.data_path, attn_dim=args.attn_dim, gat_variant=args.gat_variant, checkpoint_grounding=args.checkpoint_grounding)
     RulE_model.set_rules(rules)
 
     if not args.skip_pretrain:
