@@ -427,13 +427,25 @@ class GroundTrainer(object):
             init_logits = torch.cat(init_logits, dim=0).detach()
             if getattr(args, 'learnable_rule_weight', False):
                 self.model.rule_weight_logit = nn.Parameter(init_logits.clone())
+                # Lever 1: w_R = sigmoid(logit_R) (bounded, trainable).
+                self.model.learnable_rule_weight = True
                 logging.info('[lever1] learnable per-rule weight ENABLED; warm-started '
                              'from RulE confidence (num_rules=%d).' % init_logits.numel())
             else:
                 self.model.register_buffer('rule_weight_logit', init_logits.clone())
+                # Frozen baseline: w_R is the RAW RulE confidence (gamma_rule - d,
+                # paper Eq. 6) -- NO sigmoid -- to match the paper's "sum (w/o MLP)".
+                self.model.learnable_rule_weight = False
                 logging.info('[additive] simple aggregation with FROZEN per-rule weight '
-                             '(RulE confidence; num_rules=%d).' % init_logits.numel())
+                             '(RAW RulE confidence, no sigmoid; num_rules=%d).' % init_logits.numel())
             self.model.simple_aggregation = True
+            self.model.paper_sum = getattr(args, 'paper_sum', False)
+            if self.model.paper_sum:
+                # Bias is unused under the faithful paper sum; freeze it so it
+                # doesn't pick up any gradient signal and stays at its init value.
+                self.model.bias.requires_grad_(False)
+                logging.info('[paper_sum] faithful paper sum ENABLED: binary activation, '
+                             'no bias, raw frozen RulE confidence.')
 
         # === Pairwise FM interactions: per-rule embedding setup ===
         # One latent vector v_R per rule; the pairwise term is built in
@@ -522,16 +534,16 @@ class GroundTrainer(object):
         # Log the final optimizer layout for reproducibility.
         use_fm = getattr(args, 'fm_interactions', False)
         use_nam = getattr(args, 'nam', False)
-        fm_lr_log = float(args.fm_lr) if getattr(args, 'fm_lr', None) is not None else float(args.g_lr)
+        fm_lr_log = (float(getattr(args, 'fm_lr', None) or args.g_lr))
         nam_lr_fallback = getattr(args, 'fm_lr', None)
         nam_lr_fallback = float(nam_lr_fallback) if nam_lr_fallback is not None else float(args.g_lr)
-        # nam_lr_log = float(args.nam_lr) if getattr(args, 'nam_lr', None) is not None else float(args.nam_lr_fallback)
+        nam_lr_log = float(getattr(args, 'nam_lr', None) or nam_lr_fallback)
         logging.info('[optim] base_lr=%g%s%s'
                      % (float(args.g_lr),
                         (', fm_lr=%g fm_l2=%g' % (fm_lr_log, float(getattr(args, 'fm_l2', 1e-5))))
-                        if use_fm else ''))
-                        # (', nam_lr=%g nam_l2=%g' % (nam_lr_log, float(getattr(args, 'nam_l2', 1e-5))))
-                        # if use_nam else ''))
+                        if use_fm else '',
+                        (', nam_lr=%g nam_l2=%g' % (nam_lr_log, float(getattr(args, 'nam_l2', 1e-5))))
+                        if use_nam else ''))
 
 
         self.train_set.make_batches()
@@ -652,13 +664,22 @@ class GroundTrainer(object):
                 rule_logits = (torch.softmax(grounding_rule_score, dim=1) + 1e-8).log()
                 
                 loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
-                loss.backward()
 
-                optimizer.step()
-                optimizer.zero_grad()
+                # Under --paper_sum (no FM/NAM) every term in the grounding score
+                # is a frozen buffer or a no_grad grounding constant, so `loss`
+                # has no grad_fn and backward() would raise. Such a config is
+                # eval-only (alpha sweep over the frozen score), so skip the
+                # optimisation step. NOTE: `any(p.requires_grad ...)` is the wrong
+                # check -- beta / score_model params still require grad but never
+                # touch this score; loss.requires_grad tests reachability instead.
+                if loss.requires_grad:
+                    loss.backward()
 
-                total_loss += loss.item()
-                total_size += mask.sum().item()
+                    optimizer.step()
+                    optimizer.zero_grad()
+
+                    total_loss += loss.item()
+                    total_size += mask.sum().item()
             
             if (batch_id + 1) % print_every == 0:
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))

@@ -431,6 +431,9 @@ class RulE(torch.nn.Module):
             # (compute_adaptive_beta, the per-bucket density analysis) sees
             # density = 0 for every query, which is the correct value here.
             self._last_ground_mask = torch.zeros_like(mask, dtype=torch.bool)
+            if getattr(self, 'paper_sum', False):
+                # No rule fired; paper_sum has no bias, so return zero scores.
+                return mask, (1 - mask).bool()
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
 
         # Snapshot the pre-bias grounding mask before `mask` is overwritten
@@ -441,15 +444,30 @@ class RulE(torch.nn.Module):
 
         if getattr(self, 'simple_aggregation', False):
             # === Interpretable additive aggregation (replaces the MLP) ===
-            # score[t] = sum_R w_R * count_R[t] + bias, with w_R = sigmoid(logit_R).
+            # score[t] = sum_R w_R * count_R[t] + bias.
+            #   * Frozen baseline (--simple_aggregation only): w_R is the RAW RulE
+            #     rule confidence (w_R = gamma_rule - d, Eq. 6 in the paper). This
+            #     matches the paper's "sum (w/o MLP)" ablation, which sums the
+            #     confidences of the activated rules. NO sigmoid here -- sigmoid
+            #     squashes confidences into (0,1) and saturates the strongest
+            #     rules to ~1, destroying the relative weighting the sum relies on.
+            #   * Lever 1 (--learnable_rule_weight): w_R = sigmoid(logit_R) so the
+            #     trainable weight stays bounded in (0,1) and the warm-start from
+            #     the RulE confidence is well-defined.
             # The counts are produced under no_grad (constants), so gradients flow
-            # only through w_R (learnable) and bias -- each rule contributes
+            # only through w_R (when learnable) and bias -- each rule contributes
             # independently and additively, so w_R * count_R[t] is exactly the
             # contribution of rule R to candidate t (clean rule-level attribution).
             rule_index_t = torch.tensor(rule_index, dtype=torch.long, device=device)
             rule_count = torch.stack(rule_count, dim=0)                 # [R, batch, entities]
-            w = torch.sigmoid(self.rule_weight_logit[rule_index_t])     # [R]
-            score = (w.view(-1, 1, 1) * rule_count).sum(dim=0)          # [batch, entities]
+            if getattr(self, 'learnable_rule_weight', False):
+                w = torch.sigmoid(self.rule_weight_logit[rule_index_t]) # [R] bounded (Lever 1)
+            else:
+                w = self.rule_weight_logit[rule_index_t]                # [R] raw RulE confidence (paper "sum")
+            # paper_sum uses a binary activation (1 if rule fired) per the paper;
+            # the default additive baseline uses path counts.
+            basis = (rule_count > 0).float() if getattr(self, 'paper_sum', False) else rule_count
+            score = (w.view(-1, 1, 1) * basis).sum(dim=0)               # [batch, entities]
 
             if getattr(self, 'use_nam', False):
                 # === NAM residual: sum_R f_R(count_R[t]) ===
@@ -490,7 +508,8 @@ class RulE(torch.nn.Module):
                 Q = torch.einsum('rk,rbe->kbe', v * v, b)     # b^2 == b for binary basis
                 score = score + 0.5 * (S * S - Q).sum(dim=0)  # [batch, entities]
 
-            score = score + self.bias.unsqueeze(0)
+            if not getattr(self, 'paper_sum', False):
+                score = score + self.bias.unsqueeze(0)
             mask = torch.ones_like(mask).bool()
             _mem(f"forward END (simple_aggregation)")
             return score, mask

@@ -164,6 +164,14 @@ def parse_args(args=None):
                         help='Minimum improvement in valid MRR to count as progress for '
                              'early stopping purposes.')
 
+    # === Faithful paper "sum (w/o MLP)" ===
+    parser.add_argument('--paper_sum', action='store_true', default=False,
+                        help="Faithful reproduction of the paper's 'sum (w/o MLP)' baseline: "
+                             "binary activation (1 if rule fired, 0 otherwise), no per-entity "
+                             "bias, raw frozen RulE confidence as weights. Implies "
+                             "--simple_aggregation and disables --learnable_rule_weight. "
+                             "Composes with --fm_interactions so paper_sum+FM is possible.")
+
     return parser.parse_args(args)
 
 def main():
@@ -188,6 +196,7 @@ def main():
     cli_alpha_grid = args.alpha_grid
     cli_early_stop_patience = args.early_stop_patience
     cli_early_stop_min_delta = args.early_stop_min_delta
+    cli_paper_sum = args.paper_sum
 
     # read the given config
     if args.init_checkpoint_config:
@@ -198,8 +207,15 @@ def main():
     args.pretrain_checkpoint = pretrain_checkpoint
     if cli_save_path is not None:
         args.save_path = cli_save_path
-    args.simple_aggregation = cli_simple_aggregation
-    args.learnable_rule_weight = cli_learnable_rule_weight
+    args.paper_sum = cli_paper_sum
+    # --paper_sum forces simple_aggregation and disables learnable weights;
+    # fm_interactions/nam are left as-is so paper_sum+FM is valid.
+    if cli_paper_sum:
+        args.simple_aggregation = True
+        args.learnable_rule_weight = False
+    else:
+        args.simple_aggregation = cli_simple_aggregation
+        args.learnable_rule_weight = cli_learnable_rule_weight
     args.fm_interactions = cli_fm_interactions
     args.fm_rank = cli_fm_rank
     args.fm_l2 = cli_fm_l2
