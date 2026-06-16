@@ -35,7 +35,7 @@ echo ""
 # ── Configuration ──────────────────────────────────────────────────────────────
 CONFIG="$HOME/RulE/config/umls_hpc.json"
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
-SAVE_PATH="/vast.mnt/home/20252643/RulE/outputs/umls_binary"
+SAVE_PATH="/vast.mnt/home/20252643/RulE/outputs/umls"
 mkdir -p "${SAVE_PATH}"
 
 echo "Config     : ${CONFIG}"

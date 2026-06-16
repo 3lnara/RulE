@@ -431,8 +431,8 @@ class RulE(torch.nn.Module):
             # (compute_adaptive_beta, the per-bucket density analysis) sees
             # density = 0 for every query, which is the correct value here.
             self._last_ground_mask = torch.zeros_like(mask, dtype=torch.bool)
-            if getattr(self, 'paper_sum', False):
-                # No rule fired; paper_sum has no bias, so return zero scores.
+            if not getattr(self, 'use_bias', True):
+                # No rule fired and no bias term (paper_sum / no_bias): zero scores.
                 return mask, (1 - mask).bool()
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
 
@@ -443,72 +443,17 @@ class RulE(torch.nn.Module):
         self._last_ground_mask = (mask > 0)
 
         if getattr(self, 'simple_aggregation', False):
-            # === Interpretable additive aggregation (replaces the MLP) ===
-            # score[t] = sum_R w_R * count_R[t] + bias.
-            #   * Frozen baseline (--simple_aggregation only): w_R is the RAW RulE
-            #     rule confidence (w_R = gamma_rule - d, Eq. 6 in the paper). This
-            #     matches the paper's "sum (w/o MLP)" ablation, which sums the
-            #     confidences of the activated rules. NO sigmoid here -- sigmoid
-            #     squashes confidences into (0,1) and saturates the strongest
-            #     rules to ~1, destroying the relative weighting the sum relies on.
-            #   * Lever 1 (--learnable_rule_weight): w_R = sigmoid(logit_R) so the
-            #     trainable weight stays bounded in (0,1) and the warm-start from
-            #     the RulE confidence is well-defined.
-            # The counts are produced under no_grad (constants), so gradients flow
-            # only through w_R (when learnable) and bias -- each rule contributes
-            # independently and additively, so w_R * count_R[t] is exactly the
-            # contribution of rule R to candidate t (clean rule-level attribution).
+            # score[t] = sum_R w_R * count_R[t] (+ bias)
+            # w_R is the raw frozen RulE confidence (gamma_rule - d, Eq. 6 in the
+            # paper). paper_sum uses binary activation (1 if fired) instead of counts.
+            # The per-entity bias is added only when use_bias is True (dropped by
+            # --paper_sum and --no_bias for a purely rule-based score).
             rule_index_t = torch.tensor(rule_index, dtype=torch.long, device=device)
             rule_count = torch.stack(rule_count, dim=0)                 # [R, batch, entities]
-            if getattr(self, 'learnable_rule_weight', False):
-                w = torch.sigmoid(self.rule_weight_logit[rule_index_t]) # [R] bounded (Lever 1)
-            else:
-                w = self.rule_weight_logit[rule_index_t]                # [R] raw RulE confidence (paper "sum")
-            # paper_sum uses a binary activation (1 if rule fired) per the paper;
-            # the default additive baseline uses path counts.
+            w = self.rule_weight_logit[rule_index_t]                    # [R] raw RulE confidence (frozen)
             basis = (rule_count > 0).float() if getattr(self, 'paper_sum', False) else rule_count
             score = (w.view(-1, 1, 1) * basis).sum(dim=0)               # [batch, entities]
-
-            if getattr(self, 'use_nam', False):
-                # === NAM residual: sum_R f_R(count_R[t]) ===
-                # f_R is a shared shape-net MLP conditioned on a small learnable per-rule
-                # embedding z_R (dim nam_dim). Input features phi = [count, log1p(count)]
-                # capture the saturation shape; z_R specialises the curve per rule.
-                # The shape-net final layer is zero-inited (set in trainer), so nam
-                # contributes 0 at iteration 0 -> run starts at the frozen-linear baseline.
-                # f_R(0)=0 is enforced by multiplying by fired=1[count>0], so non-firing
-                # rules contribute exactly 0 (attribution stays clean).
-                #
-                # Memory note: phi/z are [R, batch, entities, *] -- same scale as FM's
-                # [R, batch, entities] tensor that already fits in VRAM for UMLS/WN18RR.
-                # For very large datasets with many fired rules, chunk over R if needed.
-                fired = (rule_count > 0).float()                        # [R, batch, entities]
-                phi = torch.stack(
-                    [rule_count, torch.log1p(rule_count)], dim=-1
-                )                                                        # [R, batch, entities, 2]
-                R = rule_index_t.size(0)
-                z = self.nam_emb[rule_index_t]                          # [R, nam_dim]
-                z_exp = z.view(R, 1, 1, -1).expand(
-                    R, phi.size(1), phi.size(2), z.size(-1)
-                )                                                        # [R, batch, entities, nam_dim]
-                nam_inp = torch.cat([phi, z_exp], dim=-1)               # [R, batch, entities, 2+nam_dim]
-                nam_out = self.nam_net(nam_inp).squeeze(-1)             # [R, batch, entities]
-                score = score + (nam_out * fired).sum(dim=0)            # [batch, entities]
-                _mem(f"forward NAM residual R={R}")
-
-            if getattr(self, 'use_fm', False):
-                # === Pairwise FM interactions over a binary co-fire basis ===
-                # sum_{R<R'} <v_R, v_R'> b_R[t] b_R'[t], with b_R[t] = 1[c_R[t]>0].
-                # Since b in {0,1} => b^2 = b, the standard FM squared-sum identity
-                # is exact: 0.5 * sum_f ( (sum_R v_Rf b_R)^2 - sum_R v_Rf^2 b_R ).
-                # Counts are no_grad constants, so gradients flow only through v_R.
-                b = (rule_count > 0).float()                  # [R, batch, entities]
-                v = self.rule_fm_emb[rule_index_t]            # [R, k]
-                S = torch.einsum('rk,rbe->kbe', v, b)         # [k, batch, entities]
-                Q = torch.einsum('rk,rbe->kbe', v * v, b)     # b^2 == b for binary basis
-                score = score + 0.5 * (S * S - Q).sum(dim=0)  # [batch, entities]
-
-            if not getattr(self, 'paper_sum', False):
+            if getattr(self, 'use_bias', True):
                 score = score + self.bias.unsqueeze(0)
             mask = torch.ones_like(mask).bool()
             _mem(f"forward END (simple_aggregation)")

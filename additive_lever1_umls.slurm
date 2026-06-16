@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=additive_baseline_umls
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --constraint=v100
 #SBATCH --time=2:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
@@ -37,7 +36,7 @@ echo ""
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
 
 # Output directory for this interpretable additive (Lever 1) run.
-SAVE_PATH="$HOME/RulE/outputs/additive_umls_baseline"
+SAVE_PATH="$HOME/RulE/outputs/additive_umls_baseline_nobias"
 
 echo "Pre-trained checkpoint : ${PRETRAIN_CHECKPOINT}"
 echo "Save path              : ${SAVE_PATH}"
@@ -68,6 +67,8 @@ python3 -u main.py \
     --skip_pretrain \
     --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
     --simple_aggregation \
+    --no_bias \
+    --num_iters 1 \
     --save_path "${SAVE_PATH}"
 
 TRAIN_RC=$?

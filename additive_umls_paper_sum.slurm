@@ -33,7 +33,7 @@ echo ""
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
-SAVE_PATH="$HOME/RulE/outputs/additive_umls_paper_sum"
+SAVE_PATH="$HOME/RulE/outputs/additive_umls_paper_sum_nosweep"
 
 echo "Pre-trained checkpoint : ${PRETRAIN_CHECKPOINT}"
 echo "Save path              : ${SAVE_PATH}"
@@ -66,9 +66,7 @@ python3 -u main.py \
     --skip_pretrain \
     --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
     --paper_sum \
-    --alpha_sweep \
-    --alpha_grid "0,1,2,4,6,8,10,12,16,24" \
-    --num_iters_override 1 \
+    --num_iters 1 \
     --seed 42 \
     --save_path "${SAVE_PATH}"
 

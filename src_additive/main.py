@@ -36,7 +36,7 @@ def parse_args(args=None):
     # data path
     parser.add_argument('--data_path', default="../data/wn18rr", type=str, help='dataset path')
     parser.add_argument('--rule_file', default="../data/wn18rr/mined_rules.txt", type=str)
-    # device 
+    # device
     parser.add_argument('--cuda', action='store_true',default=False, help='use GPU')
     parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
 
@@ -72,9 +72,7 @@ def parse_args(args=None):
     parser.add_argument('-init', '--init_checkpoint_config', default="../config/umls_config.json", type=str)
     parser.add_argument('-save', '--save_path', default=None, type=str)
 
-    
     # grounding training process
-  
     parser.add_argument('--mlp_rule_dim', default=100, type=int)
     parser.add_argument('--alpha', default=5.0, type=int, help='weight the KGE score')
     parser.add_argument('--smoothing', default=0.5, type=float)
@@ -83,9 +81,8 @@ def parse_args(args=None):
     parser.add_argument('--g_batch_size', default=16, type=int)
     parser.add_argument('--g_lr', default=0.00005, type=float)
     parser.add_argument('--weight_decay', default=0, type=float)
-    parser.add_argument('--num_iters', default=20, type=int)
+    parser.add_argument('--num_iters', default=None, type=int)
 
-    
     parser.add_argument('--skip_pretrain', action='store_true', default=False,
                         help='Skip pre-training and load from an existing checkpoint')
     parser.add_argument('--pretrain_checkpoint', type=str, default=None,
@@ -97,80 +94,18 @@ def parse_args(args=None):
                              'additive aggregation: score[t] = sum_R w_R * count_R[t] + bias. '
                              'Each rule contributes independently, so contributions are '
                              'directly attributable. Default off -> original MLP.')
-    parser.add_argument('--learnable_rule_weight', action='store_true', default=False,
-                        help='Lever 1: make the per-rule weight w_R = sigmoid(logit_R) a '
-                             'trainable scalar, warm-started from the RulE confidence so init '
-                             'matches the frozen baseline. Implies --simple_aggregation. '
-                             'Without this flag (but with --simple_aggregation), w_R is frozen '
-                             'at the RulE confidence.')
-
-    # === Factorization-Machine pairwise rule interactions ===
-    parser.add_argument('--fm_interactions', action='store_true', default=False,
-                        help='Add a learnable pairwise FM term over a binary co-fire basis: '
-                             'score[t] += sum_{R<R\'} <v_R, v_R\'> * 1[c_R[t]>0] * 1[c_R\'[t]>0]. '
-                             'Implies the additive/frozen-linear path; with the linear weights '
-                             'frozen, any gain is attributable purely to rule interactions.')
-    parser.add_argument('--fm_rank', type=int, default=16,
-                        help='Latent dimension k of the per-rule FM embedding v_R.')
-    parser.add_argument('--fm_l2', type=float, default=1e-5,
-                        help='L2 weight decay applied ONLY to the FM embedding rule_fm_emb '
-                             '(main overfitting knob for the interaction term).')
-    parser.add_argument('--fm_lr', type=float, default=None,
-                        help='Dedicated learning rate for the FM embedding param group. '
-                             'The FM embeddings start ~0 (0.01*randn) and must grow before '
-                             '<v_R,v_R\'> matters, so they converge slowly at the shared g_lr. '
-                             'A higher fm_lr (e.g. 5e-4..1e-3) speeds FM convergence without '
-                             'touching the (frozen-linear) bias group. None -> use g_lr.')
-    parser.add_argument('--num_iters_override', type=int, default=None,
-                        help='If set, overrides num_iters from the JSON config (which otherwise '
-                             'wins, since load_config replaces argparse defaults). Lets a single '
-                             'run train longer without editing the shared config file.')
-
-    # === NAM (Neural Additive Model) residual shape functions ===
-    parser.add_argument('--nam', action='store_true', default=False,
-                        help='Add a NAM residual: score[t] += sum_R f_R(count_R[t]) where '
-                             'f_R is a shared shape-net conditioned on a small learnable per-rule '
-                             'embedding z_R. The shape-net last layer is zero-initialized so the '
-                             'run starts at the frozen-linear baseline and learns a nonlinear '
-                             'correction. f_R(0)=0 by masking (non-firing rules contribute 0). '
-                             'Implies --simple_aggregation.')
-    parser.add_argument('--nam_dim', type=int, default=16,
-                        help='Dimension of the learnable per-rule embedding z_R used to '
-                             'condition the shared shape-net (specialises f_R per rule).')
-    parser.add_argument('--nam_hidden', type=int, default=64,
-                        help='Hidden width of the shared shape-net MLP.')
-    parser.add_argument('--nam_lr', type=float, default=None,
-                        help='Dedicated LR for NAM params (nam_net + nam_emb). '
-                             'Like FM they start ~0 and need a higher LR to converge. '
-                             'None -> fm_lr if set, else g_lr.')
-    parser.add_argument('--nam_l2', type=float, default=1e-5,
-                        help='Weight decay applied only to NAM params (independent '
-                             'regularisation knob for the shape-net).')
-
-    # === Validation-selected alpha sweep (KGE fusion weight) ===
-    parser.add_argument('--alpha_sweep', action='store_true', default=False,
-                        help='After best-valid reload, sweep --alpha_grid values on the valid '
-                             'split (KGE-fused MRR) to pick best_alpha, then report test/test_kge '
-                             'at best_alpha. Avoids tuning alpha on the test set.')
-    parser.add_argument('--alpha_grid', type=str, default='0,0.5,1,1.5,2,3,4,6,8',
-                        help='Comma-separated alpha values to try during --alpha_sweep.')
-
-    # === Early stopping ===
-    parser.add_argument('--early_stop_patience', type=int, default=0,
-                        help='Stop training if valid MRR has not improved by more than '
-                             '--early_stop_min_delta for this many consecutive iterations. '
-                             '0 = disabled (train for the full num_iters).')
-    parser.add_argument('--early_stop_min_delta', type=float, default=0.0,
-                        help='Minimum improvement in valid MRR to count as progress for '
-                             'early stopping purposes.')
 
     # === Faithful paper "sum (w/o MLP)" ===
     parser.add_argument('--paper_sum', action='store_true', default=False,
                         help="Faithful reproduction of the paper's 'sum (w/o MLP)' baseline: "
                              "binary activation (1 if rule fired, 0 otherwise), no per-entity "
                              "bias, raw frozen RulE confidence as weights. Implies "
-                             "--simple_aggregation and disables --learnable_rule_weight. "
-                             "Composes with --fm_interactions so paper_sum+FM is possible.")
+                             "--simple_aggregation.")
+    parser.add_argument('--no_bias', action='store_true', default=False,
+                        help='Drop the per-entity bias from --simple_aggregation so the '
+                             'score is purely Sum_R w_R * count_R[t] (raw counts, no '
+                             'popularity prior). Implies --simple_aggregation. The bias is '
+                             'frozen, so this mode has no trainable parameters (fixed scorer).')
 
     return parser.parse_args(args)
 
@@ -181,22 +116,9 @@ def main():
     pretrain_checkpoint = args.pretrain_checkpoint
     cli_save_path = args.save_path
     cli_simple_aggregation = args.simple_aggregation
-    cli_learnable_rule_weight = args.learnable_rule_weight
-    cli_fm_interactions = args.fm_interactions
-    cli_fm_rank = args.fm_rank
-    cli_fm_l2 = args.fm_l2
-    cli_fm_lr = args.fm_lr
-    cli_num_iters_override = args.num_iters_override
-    cli_nam = args.nam
-    cli_nam_dim = args.nam_dim
-    cli_nam_hidden = args.nam_hidden
-    cli_nam_lr = args.nam_lr
-    cli_nam_l2 = args.nam_l2
-    cli_alpha_sweep = args.alpha_sweep
-    cli_alpha_grid = args.alpha_grid
-    cli_early_stop_patience = args.early_stop_patience
-    cli_early_stop_min_delta = args.early_stop_min_delta
     cli_paper_sum = args.paper_sum
+    cli_no_bias = args.no_bias
+    cli_num_iters = args.num_iters  # None-sentinel below: argparse default is 20
 
     # read the given config
     if args.init_checkpoint_config:
@@ -208,29 +130,15 @@ def main():
     if cli_save_path is not None:
         args.save_path = cli_save_path
     args.paper_sum = cli_paper_sum
-    # --paper_sum forces simple_aggregation and disables learnable weights;
-    # fm_interactions/nam are left as-is so paper_sum+FM is valid.
-    if cli_paper_sum:
+    args.no_bias = cli_no_bias
+    # --paper_sum and --no_bias both force simple_aggregation
+    if cli_paper_sum or cli_no_bias:
         args.simple_aggregation = True
-        args.learnable_rule_weight = False
     else:
         args.simple_aggregation = cli_simple_aggregation
-        args.learnable_rule_weight = cli_learnable_rule_weight
-    args.fm_interactions = cli_fm_interactions
-    args.fm_rank = cli_fm_rank
-    args.fm_l2 = cli_fm_l2
-    args.fm_lr = cli_fm_lr
-    if cli_num_iters_override is not None:
-        args.num_iters = cli_num_iters_override
-    args.nam = cli_nam
-    args.nam_dim = cli_nam_dim
-    args.nam_hidden = cli_nam_hidden
-    args.nam_lr = cli_nam_lr
-    args.nam_l2 = cli_nam_l2
-    args.alpha_sweep = cli_alpha_sweep
-    args.alpha_grid = cli_alpha_grid
-    args.early_stop_patience = cli_early_stop_patience
-    args.early_stop_min_delta = cli_early_stop_min_delta
+    # CLI --num_iters overrides the JSON config value when explicitly provided.
+    if cli_num_iters is not None:
+        args.num_iters = cli_num_iters
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:
@@ -283,13 +191,6 @@ def main():
             
         )
     
-    # checkpoint = torch.load(os.path.join(args.save_path, 'checkpoint'))
-    # RulE_model.load_state_dict(checkpoint['model'])
-
-
-    # valid_mrr = pre_trainer.evaluate('valid', expectation=True)
-    # test_mrr = pre_trainer.evaluate('test', expectation=True)
-    
         pre_trainer.train(args)
         
         
@@ -312,16 +213,6 @@ def main():
     
     logging.info('Loaded pre-trained checkpoint from %s' % checkpoint_path)
 
-    # logging.info('Test the results of pre-training')
-    
-    # valid_mrr = pre_trainer.evaluate('valid', expectation=True)
-    # test_mrr = pre_trainer.evaluate('test', expectation=True)
-
-    # RulE_model.add_param()
-
-    # checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
-    # RulE_model.load_state_dict(checkpoint['model'])
-
     ground_trainer = GroundTrainer(
         model=RulE_model,
         args = args,
@@ -333,15 +224,8 @@ def main():
         num_worker=args.cpu_num
     )
 
-    # valid_mrr = ground_trainer.evaluate('valid', expectation=True)
-    # test_mrr = ground_trainer.evaluate('test', expectation=True)
-    
-    # args.g_batch_size = 32
-    
     ground_trainer.train(args)
     
-    # return test_mrr
-
 
 if __name__ == '__main__':
     

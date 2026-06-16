@@ -9,7 +9,6 @@ from data import Iterator, RuleDataset, KGETrainDataset, BidirectionalOneShotIte
 import torch.nn.functional as F
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from layers import MLP
 
 class PreTrainer(object):
 
@@ -395,23 +394,15 @@ class GroundTrainer(object):
     def train(self, args):
         
         # fix the parameters of pre-training
-
         self.model.entity_embedding.weight.requires_grad = False
         self.model.relation_embedding.weight.requires_grad = False
         self.model.rule_emb.weight.requires_grad = False
 
         # === Interpretable additive aggregation: per-rule weight setup ===
-        # Active when --simple_aggregation or --learnable_rule_weight is set. The
-        # per-rule weight w_R = sigmoid(logit_R) is warm-started from the RulE
-        # confidence (sigmoid(add_ruleE)), so at init the additive model matches the
-        # frozen baseline. add_ruleE depends only on the (frozen) relation/rule
-        # embeddings, so this is independent of eval_compute_rule_weight below.
-        # Created BEFORE the optimizer so a learnable weight joins the param group.
-        use_additive = (getattr(args, 'simple_aggregation', False)
-                        or getattr(args, 'learnable_rule_weight', False)
-                        or getattr(args, 'fm_interactions', False)
-                        or getattr(args, 'nam', False))
-        if use_additive:
+        # w_R is warm-started from the raw RulE confidence (gamma_rule - d, Eq. 6)
+        # and stored as a frozen buffer -- NO sigmoid -- so the additive score
+        # matches the paper's "sum (w/o MLP)" baseline exactly.
+        if getattr(args, 'simple_aggregation', False):
             rule_features = self.model.rule_features.to(self.device)
             rule_masks = self.model.rule_masks.to(self.device)
             batch = 128
@@ -425,197 +416,80 @@ class GroundTrainer(object):
                     scores, _ = self.model.add_ruleE(rules.unsqueeze(1), masks)
                     init_logits.append(scores.squeeze(1))
             init_logits = torch.cat(init_logits, dim=0).detach()
-            if getattr(args, 'learnable_rule_weight', False):
-                self.model.rule_weight_logit = nn.Parameter(init_logits.clone())
-                # Lever 1: w_R = sigmoid(logit_R) (bounded, trainable).
-                self.model.learnable_rule_weight = True
-                logging.info('[lever1] learnable per-rule weight ENABLED; warm-started '
-                             'from RulE confidence (num_rules=%d).' % init_logits.numel())
-            else:
-                self.model.register_buffer('rule_weight_logit', init_logits.clone())
-                # Frozen baseline: w_R is the RAW RulE confidence (gamma_rule - d,
-                # paper Eq. 6) -- NO sigmoid -- to match the paper's "sum (w/o MLP)".
-                self.model.learnable_rule_weight = False
-                logging.info('[additive] simple aggregation with FROZEN per-rule weight '
-                             '(RAW RulE confidence, no sigmoid; num_rules=%d).' % init_logits.numel())
+            self.model.register_buffer('rule_weight_logit', init_logits.clone())
             self.model.simple_aggregation = True
             self.model.paper_sum = getattr(args, 'paper_sum', False)
-            if self.model.paper_sum:
-                # Bias is unused under the faithful paper sum; freeze it so it
-                # doesn't pick up any gradient signal and stays at its init value.
+            # Bias is dropped under --paper_sum (faithful paper sum) or --no_bias
+            # (counts, purely rule-based). In either case freeze it so it picks up
+            # no gradient signal and stays at its init value.
+            self.model.use_bias = not (self.model.paper_sum
+                                       or getattr(args, 'no_bias', False))
+            if not self.model.use_bias:
                 self.model.bias.requires_grad_(False)
+            if self.model.paper_sum:
                 logging.info('[paper_sum] faithful paper sum ENABLED: binary activation, '
                              'no bias, raw frozen RulE confidence.')
+            elif not self.model.use_bias:
+                logging.info('[additive] simple aggregation, NO bias (raw counts, '
+                             'purely rule-based; num_rules=%d).' % init_logits.numel())
+            else:
+                logging.info('[additive] simple aggregation with FROZEN per-rule weight '
+                             '(RAW RulE confidence, no sigmoid; num_rules=%d).' % init_logits.numel())
 
-        # === Pairwise FM interactions: per-rule embedding setup ===
-        # One latent vector v_R per rule; the pairwise term is built in
-        # model.forward via the binary co-fire squared-sum identity. Created
-        # BEFORE the optimizer so it joins the parameter groups. Initialised to
-        # small noise (NOT zero): at v=0 the FM gradient vanishes (saddle), so
-        # zero-init would never learn; 0.01*randn starts FM ~= 0 yet trainable,
-        # keeping the model ~= the frozen-linear baseline at init.
-        if getattr(args, 'fm_interactions', False):
-            num_rules = self.model.rule_features.size(0)
-            k = int(getattr(args, 'fm_rank', 16))
-            self.model.rule_fm_emb = nn.Parameter(
-                0.01 * torch.randn(num_rules, k, device=self.device))
-            self.model.use_fm = True
-            logging.info('[fm] FM interactions ENABLED (rank=%d, l2=%g, num_rules=%d).'
-                         % (k, float(getattr(args, 'fm_l2', 1e-5)), num_rules))
-
-        # === NAM residual: shared shape-net + per-rule embedding ===
-        # Created BEFORE the optimizer so it joins the parameter groups.
-        # The shape-net final layer is zero-initialized so the NAM residual is
-        # exactly 0 at iter-0, making the starting point identical to the
-        # frozen-linear baseline. nam_emb uses small-noise init (same rationale
-        # as FM: zero would stall gradients at the saddle).
-        if getattr(args, 'nam', False):
-            num_rules = self.model.rule_features.size(0)
-            nam_dim = int(getattr(args, 'nam_dim', 16))
-            nam_hidden = int(getattr(args, 'nam_hidden', 64))
-            self.model.nam_emb = nn.Parameter(
-                0.01 * torch.randn(num_rules, nam_dim, device=self.device))
-            self.model.nam_net = MLP(2 + nam_dim, [nam_hidden, 1]).to(self.device)
-            nn.init.zeros_(self.model.nam_net.layers[-1].weight)
-            nn.init.zeros_(self.model.nam_net.layers[-1].bias)
-            self.model.use_nam = True
-            logging.info('[nam] NAM residual ENABLED (nam_dim=%d, hidden=%d, '
-                         'l2=%g, num_rules=%d).'
-                         % (nam_dim, nam_hidden,
-                            float(getattr(args, 'nam_l2', 1e-5)), num_rules))
-
-        # Build the optimizer with per-component param groups so that FM and NAM
-        # can use a higher dedicated LR (both start ~0 and converge slowly at
-        # the shared g_lr) and independent L2 regularisation.
-        #
-        # Groups constructed dynamically: base (bias + any other requires_grad
-        # params not claimed by FM/NAM), fm (rule_fm_emb), nam (nam_net + nam_emb).
-        # The set-of-ids trick deduplicates across groups.
-        claimed_ids: set = set()
-        param_groups = []
-
-        if getattr(args, 'fm_interactions', False):
-            fm_params = [self.model.rule_fm_emb]
-            for p in fm_params:
-                claimed_ids.add(id(p))
-            fm_lr = getattr(args, 'fm_lr', None)
-            fm_lr = float(fm_lr) if fm_lr is not None else float(args.g_lr)
-            param_groups.append({
-                'params': fm_params,
-                'lr': fm_lr,
-                'weight_decay': float(getattr(args, 'fm_l2', 1e-5)),
-            })
-
-        if getattr(args, 'nam', False):
-            nam_params = (list(self.model.nam_net.parameters())
-                          + [self.model.nam_emb])
-            for p in nam_params:
-                claimed_ids.add(id(p))
-            fm_lr_fallback = getattr(args, 'fm_lr', None)
-            fm_lr_fallback = float(fm_lr_fallback) if fm_lr_fallback is not None else float(args.g_lr)
-            nam_lr = getattr(args, 'nam_lr', None)
-            nam_lr = float(nam_lr) if nam_lr is not None else fm_lr_fallback
-            param_groups.append({
-                'params': nam_params,
-                'lr': nam_lr,
-                'weight_decay': float(getattr(args, 'nam_l2', 1e-5)),
-            })
-
-        base_params = [p for p in self.model.parameters()
-                       if p.requires_grad and id(p) not in claimed_ids]
-        param_groups.insert(0, {
-            'params': base_params,
-            'lr': float(args.g_lr),
-            'weight_decay': float(args.weight_decay),
-        })
-
-        optimizer = torch.optim.Adam(param_groups, lr=float(args.g_lr))
-
-        # Log the final optimizer layout for reproducibility.
-        use_fm = getattr(args, 'fm_interactions', False)
-        use_nam = getattr(args, 'nam', False)
-        fm_lr_log = (float(getattr(args, 'fm_lr', None) or args.g_lr))
-        nam_lr_fallback = getattr(args, 'fm_lr', None)
-        nam_lr_fallback = float(nam_lr_fallback) if nam_lr_fallback is not None else float(args.g_lr)
-        nam_lr_log = float(getattr(args, 'nam_lr', None) or nam_lr_fallback)
-        logging.info('[optim] base_lr=%g%s%s'
-                     % (float(args.g_lr),
-                        (', fm_lr=%g fm_l2=%g' % (fm_lr_log, float(getattr(args, 'fm_l2', 1e-5))))
-                        if use_fm else '',
-                        (', nam_lr=%g nam_l2=%g' % (nam_lr_log, float(getattr(args, 'nam_l2', 1e-5))))
-                        if use_nam else ''))
-
+        optimizer = torch.optim.Adam(
+            filter(lambda p: p.requires_grad, self.model.parameters()),
+            lr=float(args.g_lr),
+            weight_decay=float(args.weight_decay))
 
         self.train_set.make_batches()
         
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
-        
-        self.model.eval_compute_rule_weight(self.device)
 
+        # rules_weight_emb (the per-dim MLP rule message) is only consumed by the
+        # original MLP forward path. The additive/paper_sum path returns before
+        # touching it, so skip this precompute there.
+        if not getattr(self.model, 'simple_aggregation', False):
+            self.model.eval_compute_rule_weight(self.device)
 
-        
         logging.info('>>>>> RulE: Grounding-Training')
-        
 
         best_valid_mrr = 0.0 
         test_mrr = 0.0
 
-        # Early stopping state. patience=0 means disabled.
-        es_patience = int(getattr(args, 'early_stop_patience', 0))
-        es_min_delta = float(getattr(args, 'early_stop_min_delta', 0.0))
-        iters_no_improve = 0
-
-        warm_up_steps = args.num_iters // 2
-        current_learning_rate = float(args.g_lr)
-
         for k in range(args.num_iters):
 
-            
             logging.info('-------------------------')
             logging.info('| Iteration: {}/{}'.format(k + 1, args.num_iters))
             logging.info('-------------------------')
-        
-            # if k >= warm_up_steps:
 
-            #     current_learning_rate = current_learning_rate / 10
-            #     logging.info('Change learning_rate to %f at step %d' % (current_learning_rate, k))
-            #     optim = torch.optim.Adam(
-            #         filter(lambda p: p.requires_grad, predictor.parameters()), 
-            #         lr=current_learning_rate
-            #     )
-            #     warm_up_steps = warm_up_steps * 3
-
-            self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args)
+            self.train_step(optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args)
             valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
 
-            if valid_mrr_iter > best_valid_mrr + es_min_delta:
+            if valid_mrr_iter > best_valid_mrr:
                 best_valid_mrr = valid_mrr_iter
                 test_mrr = valid_mrr_iter
                 self.save(args, os.path.join(args.save_path, 'grounding.pt'))
-                iters_no_improve = 0
-            else:
-                iters_no_improve += 1
-                if es_patience > 0 and iters_no_improve >= es_patience:
-                    logging.info('[early_stop] No improvement for %d iterations '
-                                 '(patience=%d, min_delta=%g). Stopping.'
-                                 % (iters_no_improve, es_patience, es_min_delta))
-                    break
-        
 
         logging.info('-------------------------')
         logging.info('| Best Valid MRR (model selection): {:.6f}'.format(test_mrr))
         logging.info('-------------------------')
 
-        # Reload the best-valid checkpoint so the final valid/test/test_kge
-        # numbers below reflect the selected model, not the last training state.
-        checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
-        self.model.load_state_dict(checkpoint['model'])
-        
+        # Reload best-valid checkpoint so final eval reflects the selected model.
+        # grounding.pt is only written when valid MRR improves over the initial
+        # 0.0, so it may be missing if no iteration ever improved (e.g. a fully
+        # frozen paper_sum run where no rule fires). Fall back to the current
+        # in-memory model in that case.
+        best_ckpt = os.path.join(self.args.save_path, 'grounding.pt')
+        if os.path.exists(best_ckpt):
+            checkpoint = torch.load(best_ckpt)
+            self.model.load_state_dict(checkpoint['model'])
+        else:
+            logging.info('[eval] No best-valid checkpoint at %s (valid MRR never '
+                         'improved); evaluating current model state.' % best_ckpt)
+
         test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
-        # Use evaluate_t_with_sweep so that if --alpha_sweep is set, the best
-        # alpha is selected on valid before the final test_kge report.
-        test_mrr_iter = self.evaluate_t_with_sweep('test_kge', args, expectation=True)
+        test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
 
 
        
@@ -665,13 +539,12 @@ class GroundTrainer(object):
                 
                 loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
 
-                # Under --paper_sum (no FM/NAM) every term in the grounding score
-                # is a frozen buffer or a no_grad grounding constant, so `loss`
-                # has no grad_fn and backward() would raise. Such a config is
-                # eval-only (alpha sweep over the frozen score), so skip the
-                # optimisation step. NOTE: `any(p.requires_grad ...)` is the wrong
-                # check -- beta / score_model params still require grad but never
-                # touch this score; loss.requires_grad tests reachability instead.
+                # Under --paper_sum every term in the grounding score is a frozen
+                # buffer or a no_grad grounding constant, so `loss` has no
+                # grad_fn and backward() would raise. Skip the optimisation step
+                # in that case. NOTE: loss.requires_grad tests reachability, which
+                # is the correct check (requires_grad on a parameter alone does
+                # not guarantee the parameter appears in the loss graph).
                 if loss.requires_grad:
                     loss.backward()
 
@@ -804,155 +677,104 @@ class GroundTrainer(object):
 
 
     @torch.no_grad()
-    def _collect_kge_scores(self, split):
-        """Collect per-query (rule_logits, kge_score, flag, mask, all_h, all_r, all_t)
-        for the KGE-fused evaluation path, without applying alpha.
+    def evaluate_t(self, split, alpha=3.0, expectation=True):
 
-        Returns a dict of tensors that can be combined with an arbitrary alpha via
-        _mrr_from_logits(), allowing a cheap alpha sweep without re-running forward.
-        """
+        logging.info('>>>>> Predictor: Evaluating on {}'.format(split))
         test_set = getattr(self, "%s_set" % split)
+
         dataloader = DataLoader(test_set, 1, num_workers=self.num_worker)
         model = self.model
-        model.eval()
 
-        rule_logits_list, kge_list, all_h_list, all_r_list, all_t_list, flag_list, mask_list = \
-            [], [], [], [], [], [], []
+        model.eval()
+        concat_logits = []
+        concat_all_h = []
+        concat_all_r = []
+        concat_all_t = []
+        concat_flag = []
+        concat_mask = []
 
         for batch in tqdm(dataloader):
+
             all_h, all_r, all_t, flag = batch
             all_h = all_h.squeeze(0)
             all_r = all_r.squeeze(0)
             all_t = all_t.squeeze(0)
-            flag  = flag.squeeze(0)
+            flag = flag.squeeze(0)
 
             if self.device.type == "cuda":
                 all_h = all_h.cuda(device=self.device)
                 all_r = all_r.cuda(device=self.device)
                 all_t = all_t.cuda(device=self.device)
-                flag  = flag.cuda(device=self.device)
+                flag = flag.cuda(device=self.device)
 
             logits, mask = model(all_h, all_r, None)
+
             kge_score = model.compute_g_KGE(all_h, all_r)
+            logits = logits + alpha * kge_score
 
-            rule_logits_list.append(logits)
-            kge_list.append(kge_score)
-            all_h_list.append(all_h)
-            all_r_list.append(all_r)
-            all_t_list.append(all_t)
-            flag_list.append(flag)
-            mask_list.append(mask)
+            concat_logits.append(logits)
+            concat_all_h.append(all_h)
+            concat_all_r.append(all_r)
+            concat_all_t.append(all_t)
+            concat_flag.append(flag)
+            concat_mask.append(mask)
 
-        return dict(
-            rule_logits=torch.cat(rule_logits_list, dim=0),
-            kge_scores=torch.cat(kge_list, dim=0),
-            all_h=torch.cat(all_h_list, dim=0),
-            all_r=torch.cat(all_r_list, dim=0),
-            all_t=torch.cat(all_t_list, dim=0),
-            flag=torch.cat(flag_list, dim=0),
-            mask=torch.cat(mask_list, dim=0),
-            entity_size=test_set.graph.entity_size,
-        )
-
-    def _mrr_from_logits(self, scores_dict, alpha, expectation=True):
-        """Compute MRR+Hit@K from pre-collected score tensors and a given alpha.
-
-        scores_dict is the dict returned by _collect_kge_scores().
-        Combined logit = rule_logits + alpha * kge_scores.
-        Returns (mrr, hit1, hit3, hit10, mr).
-        """
-        rule_logits = scores_dict['rule_logits']
-        kge_scores  = scores_dict['kge_scores']
-        concat_logits = rule_logits + alpha * kge_scores
-        concat_all_t  = scores_dict['all_t']
-        concat_flag   = scores_dict['flag']
-        concat_mask   = scores_dict['mask']
-        entity_size   = scores_dict['entity_size']
+        concat_logits = torch.cat(concat_logits, dim=0)
+        concat_all_h = torch.cat(concat_all_h, dim=0)
+        concat_all_r = torch.cat(concat_all_r, dim=0)
+        concat_all_t = torch.cat(concat_all_t, dim=0)
+        concat_flag = torch.cat(concat_flag, dim=0)
+        concat_mask = torch.cat(concat_mask, dim=0)
 
         ranks = []
         for k in range(concat_all_t.size(0)):
+            h = concat_all_h[k]
+            r = concat_all_r[k]
             t = concat_all_t[k]
-            if concat_mask[k, t].item():
+            if concat_mask[k, t].item() == True:
                 val = concat_logits[k, t]
                 L = (concat_logits[k][concat_flag[k]] > val).sum().item() + 1
                 H = (concat_logits[k][concat_flag[k]] >= val).sum().item() + 2
             else:
                 L = 1
-                H = entity_size + 1
-            ranks.append((L, H))
+                H = test_set.graph.entity_size + 1
+            ranks += [[h, r, t, L, H]]
+        ranks = torch.tensor(ranks, dtype=torch.long, device=self.device)
 
-        hit1 = hit3 = hit10 = mr = mrr = 0.0
-        for (L, H) in ranks:
+        query2LH = dict()
+        for h, r, t, L, H in ranks.data.cpu().numpy().tolist():
+            query2LH[(h, r, t)] = (L, H)
+
+        hit1, hit3, hit10, mr, mrr = 0.0, 0.0, 0.0, 0.0, 0.0
+        for (L, H) in query2LH.values():
             if expectation:
                 for rank in range(L, H):
-                    w = 1.0 / (H - L)
-                    if rank <= 1:  hit1  += w
-                    if rank <= 3:  hit3  += w
-                    if rank <= 10: hit10 += w
-                    mr  += rank * w
-                    mrr += w / rank
+                    if rank <= 1:
+                        hit1 += 1.0 / (H - L)
+                    if rank <= 3:
+                        hit3 += 1.0 / (H - L)
+                    if rank <= 10:
+                        hit10 += 1.0 / (H - L)
+                    mr += rank / (H - L)
+                    mrr += 1.0 / rank / (H - L)
             else:
                 rank = H - 1
-                if rank <= 1:  hit1  += 1
-                if rank <= 3:  hit3  += 1
-                if rank <= 10: hit10 += 1
-                mr  += rank
+                if rank <= 1:
+                    hit1 += 1
+                if rank <= 3:
+                    hit3 += 1
+                if rank <= 10:
+                    hit10 += 1
+                mr += rank
                 mrr += 1.0 / rank
 
-        n = len(ranks)
-        return mrr / n, hit1 / n, hit3 / n, hit10 / n, mr / n
+        hit1 /= len(ranks)
+        hit3 /= len(ranks)
+        hit10 /= len(ranks)
+        mr /= len(ranks)
+        mrr /= len(ranks)
 
-    @torch.no_grad()
-    def evaluate_t(self, split, alpha=3.0, expectation=True):
-        """KGE-fused evaluation at a fixed alpha. Delegates to _collect_kge_scores
-        + _mrr_from_logits so the collection and ranking logic live in one place."""
-        logging.info('>>>>> Predictor: Evaluating on {}'.format(split))
-        scores_dict = self._collect_kge_scores(split)
-        mrr, hit1, hit3, hit10, mr = self._mrr_from_logits(scores_dict, alpha, expectation)
-
-        logging.info('Data : {}'.format(len(scores_dict['all_t'])))
-        logging.info('Hit1 : {:.6f}'.format(hit1))
-        logging.info('Hit3 : {:.6f}'.format(hit3))
-        logging.info('Hit10: {:.6f}'.format(hit10))
-        logging.info('MR   : {:.6f}'.format(mr))
-        logging.info('MRR  : {:.6f}'.format(mrr))
-
-        return mrr
-
-    @torch.no_grad()
-    def evaluate_t_with_sweep(self, split, args, expectation=True):
-        """If --alpha_sweep is set, pick the best alpha on the VALID split (one
-        forward pass, then cheap ranking over the alpha grid), then re-report on
-        `split` at that alpha. Otherwise fall back to evaluate_t at args.alpha.
-
-        The valid-set sweep ensures alpha is never tuned on the test set.
-        """
-        if not getattr(args, 'alpha_sweep', False):
-            return self.evaluate_t(split, float(args.alpha), expectation)
-
-        # Collect valid-set scores once.
-        logging.info('[alpha_sweep] Collecting valid-set scores for alpha grid search...')
-        valid_scores = self._collect_kge_scores('valid')
-
-        alpha_values = [float(a.strip())
-                        for a in str(getattr(args, 'alpha_grid', '0,0.5,1,1.5,2,3,4,6,8')).split(',')]
-        best_alpha = float(args.alpha)
-        best_valid_mrr = -1.0
-        for a in alpha_values:
-            mrr, _, _, _, _ = self._mrr_from_logits(valid_scores, a, expectation)
-            logging.info('[alpha_sweep] alpha=%.2f -> valid MRR=%.6f' % (a, mrr))
-            if mrr > best_valid_mrr:
-                best_valid_mrr = mrr
-                best_alpha = a
-
-        logging.info('[alpha_sweep] Best alpha=%.2f (valid MRR=%.6f)' % (best_alpha, best_valid_mrr))
-
-        # Report the target split at the best alpha.
-        logging.info('>>>>> Predictor: Evaluating on {} (alpha={})'.format(split, best_alpha))
-        scores_dict = self._collect_kge_scores(split)
-        mrr, hit1, hit3, hit10, mr = self._mrr_from_logits(scores_dict, best_alpha, expectation)
-
-        logging.info('Data : {}'.format(len(scores_dict['all_t'])))
+        logging.info('Data : {}'.format(len(query2LH)))
         logging.info('Hit1 : {:.6f}'.format(hit1))
         logging.info('Hit3 : {:.6f}'.format(hit3))
         logging.info('Hit10: {:.6f}'.format(hit10))
@@ -968,34 +790,20 @@ class GroundTrainer(object):
         Parameters:
             checkpoint (file-like): checkpoint file
         """
-        # if comm.get_rank() == 0:
         logging.info("Save checkpoint to %s" % checkpoint)
         checkpoint = os.path.expanduser(checkpoint)
-       
+
         state = {
             "model": self.model.state_dict(),
         }
-       
+
         torch.save(state, checkpoint)
 
         g_rule_embedding = self.model.mlp_feature.detach().cpu().numpy()
         np.save(
-            os.path.join(args.save_path, 'g_rule_embedding'), 
+            os.path.join(args.save_path, 'g_rule_embedding'),
             g_rule_embedding
         )
-
-        # Persist the FM per-rule embedding for offline interaction analysis
-        # (also present in grounding.pt as a Parameter; this is a convenience
-        # dump mirroring g_rule_embedding).
-        if getattr(self.model, 'use_fm', False):
-            np.save(
-                os.path.join(args.save_path, 'rule_fm_emb'),
-                self.model.rule_fm_emb.detach().cpu().numpy()
-            )
-        
-        if getattr(self.model, 'use_nam', False):
-            np.save(os.path.join(args.save_path, 'nam_emb'),
-                self.model.nam_emb.detach().cpu().numpy())
 
 
 
