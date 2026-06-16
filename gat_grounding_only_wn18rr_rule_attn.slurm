@@ -2,7 +2,7 @@
 #SBATCH --job-name=gat_grounding_wn18rr_rule_attn
 #SBATCH --partition=mcs.gpu.q
 #SBATCH --constraint=v100
-#SBATCH --time=48:00:00
+#SBATCH --time=7-00:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -40,7 +40,11 @@ echo ""
 #
 # WN18RR-specific differences vs the UMLS counterpart:
 #   - hidden_dim=500 (vs 2000), so entity_dim=1000, relation_dim=500
-#   - g_lr=0.005, alpha=1.0, smoothing=0.3 (from config)
+#   - g_lr=0.001 with step-decay x0.5 every 5 iters (g_lr_decay/g_lr_decay_step
+#     in config); alpha=1.0, smoothing=0.3. Lower LR + decay stop the valid-MRR
+#     regression after iter 1 (fixed high LR overshoots / sharpens attention).
+#   - grounding.pt now holds the BEST-valid model (periodic in-training saves go
+#     to grounding_latest.pt), so the final eval loads the best, not the last iter.
 #   - --eval_every_batches 0: per-batch eval disabled (WN18RR full eval is
 #     expensive at 40,943 entities x ~3k valid queries; per-iter eval suffices)
 #
@@ -61,7 +65,7 @@ echo ""
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/wn18rr_original/checkpoint"
 
 # Output directory for this GAT grounding run
-SAVE_PATH="$HOME/RulE/outputs/gat_wn18rr_rule_attn"
+SAVE_PATH="$HOME/RulE/outputs/gat_wn18rr_rule_attn_speedup_new"
 
 echo "Pre-trained checkpoint : ${PRETRAIN_CHECKPOINT}"
 echo "Save path              : ${SAVE_PATH}"
@@ -89,7 +93,7 @@ python3 -u main.py \
     --attn_dim 128 \
     --checkpoint_grounding \
     --attn_entropy_weight 0 \
-    --eval_every_batches 0 \
+    --eval_every_batches 1000 \
     --save_path "${SAVE_PATH}"
 
 TRAIN_RC=$?

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=gat_grounding_umls_rule_attn
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --time=3:00:00
+#SBATCH --time=08:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -43,7 +43,7 @@ echo ""
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
 
 # Output directory for this GAT grounding run
-SAVE_PATH="$HOME/RulE/outputs/gat_umls_rule_attn"
+SAVE_PATH="$HOME/RulE/outputs/gat_umls_rule_attn_speedup_mlp"
 
 echo "Pre-trained checkpoint : ${PRETRAIN_CHECKPOINT}"
 echo "Save path              : ${SAVE_PATH}"
@@ -70,6 +70,7 @@ python3 -u main.py \
     --use_rule_confidence_variant_a \
     --gat_variant rule_attn \
     --attn_dim 64 \
+    --grounding_aggregation mlp \
     --attn_entropy_weight 0 \
     --eval_every_batches 50 \
     --save_path "${SAVE_PATH}"

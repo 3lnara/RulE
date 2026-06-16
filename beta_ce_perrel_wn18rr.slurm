@@ -71,7 +71,7 @@ GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 CONFIG="$HOME/RulE/config/wn18rr_hpc.json"
 
 # Output directory for this cross-entropy per-relation run
-SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_wn18rr_densnorm"
+SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_wn18rr_nonorm"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
 # Beta hyper-parameters (stage 3 only; adaptive stage is skipped)
@@ -128,7 +128,6 @@ COMMON_ARGS=(
     --seed               "${SEED}"
     --loss               ce
     --skip_adaptive
-    --normalize_scores
     --standardize_feature
     --feature            density
 )
@@ -175,18 +174,18 @@ cd "$HOME/RulE/RulE_original/src"
 TRAIN_START=$(date +%s)
 
 # Plain CE, hard target -- the direct margin -> cross-entropy swap.
-run_variant "ce_ls0_l2_0" \
-    --label_smoothing 0.0 \
-    --beta_l2 0.0
-# CE + label smoothing 0.3 (matches the grounding-stage 'smoothing' default).
-run_variant "ce_ls0.3_l2_0" \
-    --label_smoothing 0.3 \
-    --beta_l2 0.0
-# CE + small L2 shrink toward neutral routing (beta -> 0.5).
-run_variant "ce_ls0_l2_0.01" \
-    --label_smoothing 0.0 \
-    --beta_l2 0.01
-# CE + label smoothing + L2.
+# run_variant "ce_ls0_l2_0" \
+#     --label_smoothing 0.0 \
+#     --beta_l2 0.0
+# # CE + label smoothing 0.3 (matches the grounding-stage 'smoothing' default).
+# run_variant "ce_ls0.3_l2_0" \
+#     --label_smoothing 0.3 \
+#     --beta_l2 0.0
+# # CE + small L2 shrink toward neutral routing (beta -> 0.5).
+# run_variant "ce_ls0_l2_0.01" \
+#     --label_smoothing 0.0 \
+#     --beta_l2 0.01
+# # CE + label smoothing + L2.
 run_variant "ce_ls0.3_l2_0.01" \
     --label_smoothing 0.3 \
     --beta_l2 0.01

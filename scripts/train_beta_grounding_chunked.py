@@ -28,11 +28,14 @@ def parse_args():
                        help='Fixed alpha for comparison baseline')
     # Adaptive-beta feature + score scaling -----------------------------------
     parser.add_argument('--feature', type=str, default='density',
-                       choices=['density', 'num_rules'],
+                       choices=['density', 'num_rules', 'kge_max'],
                        help="Per-query feature the adaptive head conditions on. "
                             "'density': fraction of candidate entities with >=1 "
                             "rule fired. 'num_rules': fraction of the relation's "
-                            "rules that fired for the (h, r) query.")
+                            "rules that fired for the (h, r) query. "
+                            "'kge_max': max KGE score over filtered candidates "
+                            "(requires --standardize_feature; the raw value is "
+                            "dataset/relation-scale-dependent).")
     parser.add_argument('--normalize_scores', action='store_true',
                        help='Per-query (over entities) divide rule_logits and '
                             'kge_score by their std before mixing, so the convex '
@@ -114,6 +117,16 @@ def parse_args():
                             'Since beta_density stays 0, adaptive beta would equal the '
                             'per-relation beta exactly, so the adaptive column is dropped '
                             'from the summary/tables. Use for a clean per-relation-only run.')
+    parser.add_argument('--freeze_intercept', action='store_true',
+                       help='Skip stage [3]: do NOT train the per-relation/global '
+                            'intercept; leave it at init (logit 0 => sigmoid 0.5, '
+                            'neutral routing) and train ONLY the adaptive '
+                            'beta_density slope in stage [6]. Isolates the per-query '
+                            'feature effect around a fixed 0.5 baseline (use when the '
+                            'per-relation intercept already collapsed to ~0.5 and you '
+                            'just want to test whether the feature adds signal). '
+                            'Requires the adaptive stage, so it is incompatible with '
+                            '--skip_adaptive.')
     return parser.parse_args()
 
 
@@ -172,13 +185,15 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             # below for the rule/KGE rank correlation.
             rule_logits, mask = model(all_h, all_r, None)
 
-            # Read the per-query adaptive feature (density or num_rules) the
-            # same way compute_adaptive_beta does, so bucket edges line up.
+            # Compute KGE scores before reading the adaptive feature, so that
+            # 'kge_max' (which needs update_kge_stash) is populated in time.
+            kge_score = model.compute_g_KGE(all_h, all_r)
+            model.update_kge_stash(kge_score, flag)
+
+            # Read the per-query adaptive feature (density, num_rules, or kge_max)
+            # the same way compute_adaptive_beta does, so bucket edges line up.
             if return_per_query:
                 all_feature.append(model.get_query_feature().detach().cpu())
-
-            # Combine with KGE
-            kge_score = model.compute_g_KGE(all_h, all_r)
 
             # Per-query Spearman corr between rule and KGE rankings (Pearson on
             # rank vectors via argsort().argsort()). Computed once per batch on
@@ -371,6 +386,9 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
         with torch.no_grad():
             rule_logits, mask = model(all_h, all_r, None)
             kge_score = model.compute_g_KGE(all_h, all_r)
+            # Populate _last_kge_max before compute_adaptive_beta can be called.
+            # Safe no-op cost for density/num_rules (just fills the stash).
+            model.update_kge_stash(kge_score, flag)
             # Per-query score normalization (same transform as evaluate) so the
             # convex combination trains on a common scale. The adaptive feature
             # is read from _last_ground_mask / _last_num_rules, not from these
@@ -410,6 +428,7 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
         # feature for every sample i -> wrong per-query density/num_rules.
         saved_ground_mask = model._last_ground_mask
         saved_num_rules = model._last_num_rules
+        saved_kge_max = model._last_kge_max
 
         for i in valid_indices:
             r_i = all_r[i:i+1]
@@ -424,9 +443,13 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
                 model._last_num_rules = (
                     saved_num_rules[i:i+1] if saved_num_rules is not None else None
                 )
+                model._last_kge_max = (
+                    saved_kge_max[i:i+1] if saved_kge_max is not None else None
+                )
                 beta_i, _ = model.compute_adaptive_beta(rl_i, r_i)
                 model._last_ground_mask = saved_ground_mask
                 model._last_num_rules = saved_num_rules
+                model._last_kge_max = saved_kge_max
             elif model.use_per_relation:
                 beta_i = torch.sigmoid(model.beta[r_i[0]]).unsqueeze(-1)
             else:
@@ -539,7 +562,11 @@ def compute_feature_stats(model, dataloader, device):
             all_h, all_r, all_t, flag = batch
             all_h = all_h.squeeze(0).to(device)
             all_r = all_r.squeeze(0).to(device)
+            flag = flag.squeeze(0).to(device)
             model(all_h, all_r, None)
+            if model.feature_name == 'kge_max':
+                kge_score = model.compute_g_KGE(all_h, all_r)
+                model.update_kge_stash(kge_score, flag)
             feats.append(model.get_query_feature().detach().cpu())
     feats = torch.cat(feats, dim=0).float()
     mean = feats.mean()
@@ -952,6 +979,14 @@ class FactListValidDataset(Dataset):
 def main():
     args = parse_args()
 
+    if args.freeze_intercept and args.skip_adaptive:
+        raise ValueError(
+            "--freeze_intercept and --skip_adaptive are mutually exclusive: the "
+            "first skips intercept training and the second skips beta_density "
+            "training, so together NOTHING would be trained (pure fixed-0.5 mix). "
+            "Drop one of them."
+        )
+
     # --- Reproducibility -----------------------------------------------------
     # Seed the three RNG sources that affect this script:
     #   - random            : used by FactListValidDataset and split_facts_per_relation.
@@ -978,6 +1013,7 @@ def main():
     else:
         print(f"Negative sampling: {args.neg_sampling} (K={args.num_negatives}, hard_frac={args.mixed_hard_frac})")
     print(f"Adaptive beta stage: {'DISABLED (--skip_adaptive)' if args.skip_adaptive else 'enabled'}")
+    print(f"Intercept stage [3]: {'FROZEN at 0.5 (--freeze_intercept)' if args.freeze_intercept else 'trained'}")
     
     # Load config
     config = load_config(args.config)
@@ -1139,51 +1175,59 @@ def main():
         print_results(f"{_stage3_label} (untrained)", metrics_beta_before)
         print_beta_stats(model)
 
-        # === Train intercept (per-relation or global) ===
-        print(f"\n[3] Training {_stage3_label.lower()} for {args.epochs} epochs...")
-
-        if model.use_per_relation:
-            model.beta.requires_grad = True
-            model.global_beta.requires_grad = False
-            _intercept_param = model.beta
+        # === Train intercept (per-relation or global), unless frozen ===
+        if args.freeze_intercept:
+            # Leave beta / global_beta at their zero init (sigmoid(0)=0.5,
+            # neutral routing). best_mrr / best_epoch_3 keep the NaN / -1
+            # defaults set above. Only beta_density is trained in stage [6].
+            print(f"\n[3] SKIPPED -- --freeze_intercept: {_stage3_label.lower()} "
+                  f"left at init (logit 0 => sigmoid 0.5, neutral routing). "
+                  f"Only the adaptive beta_density slope is trained (stage [6]).")
         else:
-            model.beta.requires_grad = False
-            model.global_beta.requires_grad = True
-            _intercept_param = model.global_beta
-        model.beta_density.requires_grad = False
-        optimizer = torch.optim.Adam([_intercept_param], lr=args.lr)
+            print(f"\n[3] Training {_stage3_label.lower()} for {args.epochs} epochs...")
 
-        best_mrr = 0
-        best_beta = model.beta.data.clone()
-        best_global = model.global_beta.data.clone()
-        best_epoch_3 = 0
+            if model.use_per_relation:
+                model.beta.requires_grad = True
+                model.global_beta.requires_grad = False
+                _intercept_param = model.beta
+            else:
+                model.beta.requires_grad = False
+                model.global_beta.requires_grad = True
+                _intercept_param = model.global_beta
+            model.beta_density.requires_grad = False
+            optimizer = torch.optim.Adam([_intercept_param], lr=args.lr)
 
-        for epoch in range(args.epochs):
-            loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False,
-                                    normalize_scores=args.normalize_scores,
-                                    neg_sampling=args.neg_sampling,
-                                    num_negatives=args.num_negatives,
-                                    mixed_hard_frac=args.mixed_hard_frac,
-                                    beta_l2=args.beta_l2,
-                                    loss_type=args.loss,
-                                    label_smoothing=args.label_smoothing)
-            model.eval()
-            val_metrics = evaluate(model, valid_select_loader, device, use_beta=True,
-                                   normalize_scores=args.normalize_scores)
+            best_mrr = 0
+            best_beta = model.beta.data.clone()
+            best_global = model.global_beta.data.clone()
+            best_epoch_3 = 0
 
-            print(f"\nEpoch {epoch+1}/{args.epochs}:")
-            print(f"  Loss: {loss:.4f}")
-            print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
+            for epoch in range(args.epochs):
+                loss = train_beta_epoch(model, valid_train_loader, optimizer, device, adaptive=False,
+                                        normalize_scores=args.normalize_scores,
+                                        neg_sampling=args.neg_sampling,
+                                        num_negatives=args.num_negatives,
+                                        mixed_hard_frac=args.mixed_hard_frac,
+                                        beta_l2=args.beta_l2,
+                                        loss_type=args.loss,
+                                        label_smoothing=args.label_smoothing)
+                model.eval()
+                val_metrics = evaluate(model, valid_select_loader, device, use_beta=True,
+                                       normalize_scores=args.normalize_scores)
 
-            if val_metrics['MRR'] > best_mrr:
-                best_mrr = val_metrics['MRR']
-                best_beta = model.beta.data.clone()
-                best_global = model.global_beta.data.clone()
-                best_epoch_3 = epoch + 1
-                print(f"  New best MRR!")
+                print(f"\nEpoch {epoch+1}/{args.epochs}:")
+                print(f"  Loss: {loss:.4f}")
+                print(f"  Valid-select MRR: {val_metrics['MRR']:.4f}, Hit@10: {val_metrics['Hit@10']:.4f}")
 
-        model.beta.data = best_beta
-        model.global_beta.data = best_global
+                if val_metrics['MRR'] > best_mrr:
+                    best_mrr = val_metrics['MRR']
+                    best_beta = model.beta.data.clone()
+                    best_global = model.global_beta.data.clone()
+                    best_epoch_3 = epoch + 1
+                    print(f"  New best MRR!")
+
+            model.beta.data = best_beta
+            model.global_beta.data = best_global
 
         # Save progress after stage 3. beta_density is still 0 here; it will
         # be overwritten by the post-stage-6 save below.
@@ -1201,12 +1245,13 @@ def main():
         )
 
     _stage3_label = "Per-relation Beta" if model.use_per_relation else "Global Beta"
-    print(f"\n[4] Testing with TRAINED {_stage3_label.lower()}...")
+    _stage4_state = "FROZEN 0.5" if args.freeze_intercept else "TRAINED"
+    print(f"\n[4] Testing with {_stage4_state} {_stage3_label.lower()}...")
     metrics_beta_after, pq_beta = evaluate(
         model, test_dataloader, device, use_beta=True, return_per_query=True,
         normalize_scores=args.normalize_scores,
     )
-    print_results(f"{_stage3_label} (trained)", metrics_beta_after)
+    print_results(f"{_stage3_label} ({'frozen 0.5' if args.freeze_intercept else 'trained'})", metrics_beta_after)
     print_beta_stats(model)
     
     # === Adaptive Beta (optional; disabled by --skip_adaptive) ===

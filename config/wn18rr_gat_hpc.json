@@ -31,7 +31,9 @@
     "batch_per_epoch": 1000000,
     "print_every": 1000,
     "g_batch_size": 32,
-    "g_lr": 0.005,
+    "g_lr": 0.001,
+    "g_lr_decay": 0.5,
+    "g_lr_decay_step": 5,
     "weight_decay": 0,
     "num_iters": 20,
     "topk": 40943

@@ -407,6 +407,20 @@ class GroundTrainer(object):
             lr=float(args.g_lr), 
             weight_decay=float(args.weight_decay))
 
+        # Step-decay the grounding LR across iterations. We fine-tune only the
+        # GAT attention params on a frozen backbone, which overshoots at a fixed
+        # high LR (valid MRR peaks at iter 1 then regresses while attention
+        # sharpens). Decay LR by g_lr_decay every g_lr_decay_step iterations.
+        # Defaults to a no-op (g_lr_decay=1.0) so datasets that do not set these
+        # keys are unaffected. A scheduler (not optimizer re-creation) is used so
+        # Adam's moment estimates carry across each decay step.
+        g_lr_decay = float(getattr(args, 'g_lr_decay', 1.0))
+        g_lr_decay_step = max(1, int(getattr(args, 'g_lr_decay_step', max(1, args.num_iters // 4))))
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer, step_size=g_lr_decay_step, gamma=g_lr_decay)
+        logging.info('[lr] grounding base_lr={:g}, decay x{:g} every {} iter(s)'.format(
+            float(args.g_lr), g_lr_decay, g_lr_decay_step))
+
 
         self.train_set.make_batches()
         
@@ -444,25 +458,13 @@ class GroundTrainer(object):
         best_valid_mrr = 0.0 
         test_mrr = 0.0
 
-        warm_up_steps = args.num_iters // 2
-        current_learning_rate = float(args.g_lr)
-
         for k in range(args.num_iters):
 
             
             logging.info('-------------------------')
             logging.info('| Iteration: {}/{}'.format(k + 1, args.num_iters))
             logging.info('-------------------------')
-        
-            # if k >= warm_up_steps:
-
-            #     current_learning_rate = current_learning_rate / 10
-            #     logging.info('Change learning_rate to %f at step %d' % (current_learning_rate, k))
-            #     optim = torch.optim.Adam(
-            #         filter(lambda p: p.requires_grad, predictor.parameters()), 
-            #         lr=current_learning_rate
-            #     )
-            #     warm_up_steps = warm_up_steps * 3
+            logging.info('learning_rate = {:g}'.format(optimizer.param_groups[0]['lr']))
 
             self.train_step( optimizer, train_dataloader, args.batch_per_epoch, args.smoothing, args.print_every, args, iter_idx=k)
             valid_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
@@ -470,10 +472,21 @@ class GroundTrainer(object):
             # test_mrr_iter = self.evaluate_t('test_kge', args.alpha, expectation=True)
             
 
+            # grounding.pt is reserved for the BEST-valid model. The periodic
+            # save in train_step writes grounding_latest.pt instead, so this is
+            # the only writer of grounding.pt and a later (worse) iteration can
+            # no longer overwrite the best checkpoint.
             if valid_mrr_iter > best_valid_mrr:
                 best_valid_mrr = valid_mrr_iter
-                test_mrr = valid_mrr_iter  # Fixed: was referencing undefined test_mrr_iter
+                test_mrr = valid_mrr_iter  # best valid MRR (reported as Final below)
                 self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                logging.info('New best valid MRR {:.6f} -> saved grounding.pt'.format(best_valid_mrr))
+            else:
+                logging.info('valid MRR {:.6f} <= best {:.6f}; grounding.pt unchanged'.format(
+                    valid_mrr_iter, best_valid_mrr))
+
+            # Decay the grounding LR for the next iteration (no-op when g_lr_decay == 1.0).
+            scheduler.step()
         
 
         logging.info('-------------------------')
@@ -581,7 +594,13 @@ class GroundTrainer(object):
                 
                 total_loss = 0.0
                 total_size = 0.0
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                # Periodic crash-recovery checkpoint ONLY. Write to a SEPARATE
+                # file so it never overwrites grounding.pt, which train() reserves
+                # for the best-valid model. (Previously this wrote grounding.pt
+                # every print_every batches, so the final grounding.pt held the
+                # last iteration's weights instead of the best-valid ones.)
+                self.save(args, os.path.join(args.save_path, 'grounding_latest.pt'),
+                          save_rule_embedding=False)
 
             # Per-batch validation in iteration 1 only. Tracks whether MRR is
             # already at its peak after batch 0 (i.e. all subsequent training
@@ -817,11 +836,15 @@ class GroundTrainer(object):
         return mrr
 
 
-    def save(self, args, checkpoint):
+    def save(self, args, checkpoint, save_rule_embedding=True):
         """
         Save checkpoint to file.
         Parameters:
             checkpoint (file-like): checkpoint file
+            save_rule_embedding (bool): also dump g_rule_embedding.npy. Set False
+                for the periodic crash-recovery checkpoint so the npy stays
+                aligned with the best-valid grounding.pt rather than a worse
+                intermediate state.
         """
         # if comm.get_rank() == 0:
         logging.info("Save checkpoint to %s" % checkpoint)
@@ -833,7 +856,7 @@ class GroundTrainer(object):
        
         torch.save(state, checkpoint)
 
-        if hasattr(self.model, 'mlp_feature'):
+        if save_rule_embedding and hasattr(self.model, 'mlp_feature'):
             g_rule_embedding = self.model.mlp_feature.detach().cpu().numpy()
             np.save(
                 os.path.join(args.save_path, 'g_rule_embedding'), 

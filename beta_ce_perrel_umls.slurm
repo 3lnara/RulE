@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=beta_ce_perrel_fb15k237_kgemax
+#SBATCH --job-name=beta_ce_perrel_umls_kgemax
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --constraint=v100
-#SBATCH --time=28:00:00
+#SBATCH --time=04:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
@@ -14,38 +13,32 @@
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Adaptive kge_max mixing-weight (beta) training — FB15k-237, FIXED-0.5 intercept.
+# Adaptive mixing-weight (beta) training on UMLS with the kge_max feature.
 #
-# Experiment (ii): does a per-query kge_max slope help on top of a NEUTRAL 0.5
-# baseline?  The per-relation intercept on FB15k already collapsed to ~0.5
-# (mean 0.504, std 0.019; Rel-Beta MRR 0.3639 vs Fixed-alpha 0.3584), so we do
-# NOT train it here:
-#   --freeze_intercept : stage [3] is skipped; beta[r] stays at init
-#                        (logit 0 => sigmoid 0.5). Only the adaptive beta_density
-#                        slope is trained (stage [6]):
-#                            beta(h,r) = sigmoid(0 + beta_density * z(kge_max)).
-#   --feature kge_max  : per-query max KGE over filtered candidates. Raw RotatE
-#                        scale, so --standardize_feature z-scores it on the
-#                        beta-train split (beta_density is then a unit-variance
-#                        slope, comparable across datasets).
-#   --normalize_scores : rule/KGE put on a common per-query scale before mixing.
+# The query-adaptive stage MUST run here: kge_max is a PER-QUERY feature and it
+# only enters the mix through beta = sigmoid(beta[r] + beta_density * kge_max),
+# i.e. via the beta_density slope trained in stage [6]. (This is why
+# --skip_adaptive is NOT set -- with it, beta_density stays 0, the feature is
+# multiplied by zero, and --feature kge_max becomes a no-op.) The run therefore
+# does two stages: [3] trains the per-relation intercept beta[r] (a baseline
+# column), then [6] trains beta_density on kge_max on top of it.
 #
-# Ablation axis: under --freeze_intercept, --beta_l2 is a NO-OP (it only shrinks
-# the *trained* intercept, which we no longer train), so an L2 grid would be
-# redundant — both L2 levels produce byte-identical runs. The single remaining
-# axis that affects the kge_max slope is label_smoothing, hence 2 variants.
-# beta_density is one scalar fit with early stopping, so it needs no L2 of its own.
+# Differences from beta_ce_perrel_wn18rr.slurm:
+#   1. Dataset: UMLS (small graph, much faster than WN18RR/FB15k-237).
+#   2. --feature kge_max  : the adaptive head conditions on the max filtered KGE
+#                           score per query rather than grounding density.
+#                           kge_max is a raw RotatE score (not bounded [0,1]),
+#                           so --standardize_feature is required: z-scores the
+#                           feature once on the beta-train split so beta[r] is
+#                           the log-odds at the average query and beta_density
+#                           has a well-conditioned, dataset-invariant scale.
+#   3. NO --skip_adaptive : the adaptive (per-query) stage is enabled -- it is
+#                           the whole point of testing a per-query feature.
+#   4. FIXED_ALPHA=2.0    : matches the WN18RR/UMLS density-norm runs for direct
+#                           comparison of the mixing baseline.
 #
-#   FIXED_ALPHA = 3.0  : FB15k's published operating point — the [1] baseline.
-#   BETA_EPOCHS = 6     : enough for the single beta_density scalar to converge.
-#
-#   Ablation (2 variants):
-#     freeze_kgemax_ls0.2 -- label smoothing matched to the grounding objective
-#     freeze_kgemax_ls0   -- hard-target control
-#
-#   Fixed across all variants:
-#     --loss ce, --freeze_intercept, --feature kge_max, --normalize_scores,
-#     --standardize_feature
+# Ablation grid (identical to the WN18RR CE grid):
+#   label_smoothing in {0.0, 0.3}  x  beta_l2 in {0.0, 0.01}  = 4 variants.
 # ─────────────────────────────────────────────────────────────────────────────
 
 # ── GPU info ───────────────────────────────────────────────────────────────────
@@ -74,25 +67,22 @@ echo "PyTorch : $(python3 -c 'import torch; print(torch.__version__, "| CUDA:", 
 echo ""
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Reuse the grounding checkpoint from the original FB15k-237 run — the same
-# rule + KGE heads used by feature_validity_fb15k.slurm.
-ORIG_OUTPUT="$HOME/RulE/outputs/fb15k237_original"
+# Grounding checkpoint produced by the original MLP run on UMLS.
+ORIG_OUTPUT="$HOME/RulE/outputs/umls"
+PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
 GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 
-# The pretrain checkpoint is used only for the guard below — the beta training
-# script loads the grounding checkpoint directly.
-PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
+CONFIG="$HOME/RulE/config/umls_hpc.json"
 
-CONFIG="$HOME/RulE/config/fb15k237_hpc.json"
-
-SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_fb15k237_kgemax_nonorm_perrel"
+SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_umls_kgemax_st_nonorm"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
-# Beta hyper-parameters
-BETA_EPOCHS=6      # plateau is typically reached by ep 6-7; saves ~30% wall-time
+# Beta hyper-parameters. BETA_LR drives the per-relation intercept (stage 3);
+# DENSITY_LR drives the adaptive beta_density slope on kge_max (stage 6).
+BETA_EPOCHS=10
 BETA_LR=0.001
-DENSITY_LR=0.01
-FIXED_ALPHA=3.0    # FB15k's published operating point (config: alpha=3.0)
+DENSITY_LR=0.001
+FIXED_ALPHA=2.0
 SEED=42
 
 ABLATION_ROOT="${SAVE_PATH}"
@@ -101,8 +91,8 @@ echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
 echo "Config                 : ${CONFIG}"
 echo "Save path              : ${SAVE_PATH}"
-echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR}"
-echo "Fixed alpha (baseline) : ${FIXED_ALPHA}"
+echo "Feature                : kge_max (standardized, per-query adaptive)"
+echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR} (intercept), ${DENSITY_LR} (density)"
 echo "Loss                   : cross-entropy (per-relation intercept + adaptive kge_max)"
 echo "Started                : $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
@@ -110,8 +100,8 @@ echo ""
 # ── Validate checkpoints ───────────────────────────────────────────────────────
 missing=0
 if [ ! -f "${PRETRAIN_CHECKPOINT}" ] && [ ! -d "${PRETRAIN_CHECKPOINT}" ]; then
-    echo "WARN: Pre-training checkpoint not found at ${PRETRAIN_CHECKPOINT}"
-    echo "      (beta training only needs grounding.pt, continuing)"
+    echo "ERROR: Pre-training checkpoint not found at ${PRETRAIN_CHECKPOINT}"
+    missing=1
 fi
 if [ ! -f "${GROUNDING_CHECKPOINT}" ]; then
     echo "ERROR: Grounding checkpoint not found at ${GROUNDING_CHECKPOINT}"
@@ -131,6 +121,9 @@ echo "GPU memory monitor PID : ${GPU_MON_PID}  (log: ${GPU_LOG})"
 echo ""
 
 # ── Shared arguments for every variant ────────────────────────────────────────
+# --feature kge_max + --standardize_feature are the defining flags of this
+# script vs the density-norm CE runs. --skip_adaptive is deliberately NOT set:
+# kge_max only takes effect through the adaptive beta_density slope (stage 6).
 COMMON_ARGS=(
     --config             "${CONFIG}"
     --checkpoint         "${GROUNDING_CHECKPOINT}"
@@ -140,8 +133,8 @@ COMMON_ARGS=(
     --alpha              "${FIXED_ALPHA}"
     --seed               "${SEED}"
     --loss               ce
-    --standardize_feature
     --feature            kge_max
+    --standardize_feature
 )
 
 # ── run_variant <name> [extra args…] ──────────────────────────────────────────
@@ -182,14 +175,22 @@ run_variant() {
 cd "$HOME/RulE/RulE_original/src"
 TRAIN_START=$(date +%s)
 
-# label smoothing matched to FB15k's grounding objective (config smoothing=0.2).
-run_variant "freeze_kgemax_ls0.2" \
-    --label_smoothing 0.2
-
-# hard-target control: isolates the label-smoothing effect on the kge_max slope.
-# (No L2 axis: --beta_l2 only shrinks the trained intercept, which is frozen here.)
-# run_variant "freeze_kgemax_ls0" \
-#     --label_smoothing 0.0
+# Plain CE, hard target.
+run_variant "ce_ls0_l2_0" \
+    --label_smoothing 0.0 \
+    --beta_l2 0.0
+# CE + label smoothing 0.3 (matches the grounding-stage 'smoothing' default).
+run_variant "ce_ls0.2_l2_0" \
+    --label_smoothing 0.2 \
+    --beta_l2 0.0
+# CE + small L2 shrink toward neutral routing (beta -> 0.5).
+run_variant "ce_ls0_l2_0.01" \
+    --label_smoothing 0.0 \
+    --beta_l2 0.01
+# CE + label smoothing + L2.
+run_variant "ce_ls0.2_l2_0.01" \
+    --label_smoothing 0.2 \
+    --beta_l2 0.01
 
 TRAIN_END=$(date +%s)
 TRAIN_WALL=$(( TRAIN_END - TRAIN_START ))

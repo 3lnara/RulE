@@ -199,13 +199,55 @@ def _entropy(scores):
     return float(-(p * torch.log(p.clamp_min(1e-12))).sum().item())
 
 
-def collect(model, dataloader, device, feature_names):
+def _filtered_rr_grid(rule_row, kge_row, beta_grid, flag_row, mask_row, t):
+    """Reciprocal filtered ranks of the true tail under the convex mix
+    beta*rule + (1-beta)*kge for EVERY beta in beta_grid, vectorized over the grid.
+
+    Per beta this reproduces `_filtered_rank` exactly (tie-averaged, filtered by
+    flag_row, gated by mask_row[t]), so the grid endpoints beta=1 / beta=0 match
+    the rule-only / kge-only ranks computed elsewhere. The whole grid is a single
+    [B, E] broadcast so the screen stays cheap even for large graphs.
+
+    Args:
+        rule_row, kge_row: [E] score rows for one query (any device).
+        beta_grid:         [B] convex weights in [0, 1].
+        flag_row:          [E] bool, True for filtered candidates (true tail excluded).
+        mask_row:          [E] bool, model rankability mask.
+        t:                 scalar tensor, true tail index.
+
+    Returns:
+        [B] float64 reciprocal ranks on CPU, aligned with beta_grid.
+    """
+    B = beta_grid.numel()
+    if bool(mask_row[t].item()):
+        bg = beta_grid.to(rule_row.device).view(B, 1)
+        mix = bg * rule_row.view(1, -1) + (1.0 - bg) * kge_row.view(1, -1)   # [B, E]
+        true_val = mix[:, t].view(B, 1)                                      # [B, 1]
+        cand = mix[:, flag_row]                                              # [B, C]
+        # Tie-averaged rank: midpoint of strict-greater and greater-equal counts,
+        # matching _filtered_rank's (L + H - 1) / 2 with L = #(>)+1, H = #(>=)+2.
+        gt = (cand > true_val).sum(dim=1).double() + 1.0
+        ge = (cand >= true_val).sum(dim=1).double() + 2.0
+        rank = (gt + ge - 1.0) / 2.0
+    else:
+        rank = torch.full((B,), (flag_row.numel() + 1) / 2.0, dtype=torch.float64)
+    return (1.0 / rank).cpu()
+
+
+def collect(model, dataloader, device, feature_names, alpha, beta_grid):
     """Single pass over the split. Returns dict feature_name -> tensor[N] plus
-    RR_rule, RR_kge, rule_advantage, and global anchor stats.
+    RR_rule, RR_kge, rule_advantage, global anchor stats, and the convex-mixing
+    quantities needed by the mixing oracle:
+      - rr_alpha : [N]    reciprocal rank under the fixed-alpha baseline
+                          (rule + alpha*kge), the method per-relation beta must beat.
+      - rr_mix   : [N, B] reciprocal rank under beta*rule + (1-beta)*kge for each
+                          beta in beta_grid (column-aligned with beta_grid).
     """
     feats = {name: [] for name in feature_names}
     rr_rule, rr_kge = [], []
+    rr_alpha, rr_mix = [], []
     rels = []
+    beta_grid_dev = beta_grid.to(device)
 
     with torch.no_grad():
         for batch in dataloader:
@@ -221,6 +263,10 @@ def collect(model, dataloader, device, feature_names):
             # Vectorized whole-row features (match get_query_feature semantics).
             ground_mask = getattr(model, '_last_ground_mask', None)
             num_rules_stash = getattr(model, '_last_num_rules', None)
+            conf_rules_stash = getattr(model, '_last_conf_rules', None)
+            top_conf_stash = getattr(model, '_last_top_rule_conf', None)
+            rule_conc_stash = getattr(model, '_last_rule_concentration', None)
+            cand_conc_stash = getattr(model, '_last_cand_concentration', None)
 
             B = all_t.size(0)
             for k in range(B):
@@ -230,6 +276,15 @@ def collect(model, dataloader, device, feature_names):
                 rr_rule.append(1.0 / r_rank)
                 rr_kge.append(1.0 / k_rank)
                 rels.append(int(all_r[k].item()))
+
+                # Fixed-alpha baseline (rule + alpha*kge) and the convex beta grid.
+                # Both reuse the exact filtered-rank logic so they are directly
+                # comparable to rr_rule / rr_kge above.
+                a_rank = _filtered_rank(rule_logits[k] + alpha * kge_score[k],
+                                        flag[k], mask[k], t)
+                rr_alpha.append(1.0 / a_rank)
+                rr_mix.append(_filtered_rr_grid(rule_logits[k], kge_score[k],
+                                                beta_grid_dev, flag[k], mask[k], t))
 
                 rule_c = _candidate_scores(rule_logits[k], flag[k])
                 kge_c = _candidate_scores(kge_score[k], flag[k])
@@ -241,6 +296,27 @@ def collect(model, dataloader, device, feature_names):
                     elif name == 'num_rules':
                         val = (float(num_rules_stash[k].item())
                                if num_rules_stash is not None else float('nan'))
+                    elif name == 'conf_rules':
+                        # Fraction of the relation's rule-confidence mass that
+                        # fired (confidence-weighted analogue of num_rules).
+                        val = (float(conf_rules_stash[k].item())
+                               if conf_rules_stash is not None else float('nan'))
+                    elif name == 'top_rule_confidence':
+                        # Max rule_confidence (RulE plausibility) among rules that
+                        # fired for this query; 0 if no rule fired.
+                        val = (float(top_conf_stash[k].item())
+                               if top_conf_stash is not None else float('nan'))
+                    elif name == 'rule_concentration':
+                        # 1 - normalized_entropy over per-rule grounding mass.
+                        # High = one rule dominates; low = many rules fire evenly.
+                        val = (float(rule_conc_stash[k].item())
+                               if rule_conc_stash is not None else float('nan'))
+                    elif name == 'cand_concentration':
+                        # 1 - normalized_entropy over summed grounding mass across
+                        # candidate tails. High = few tails hit (discriminative);
+                        # low = many tails hit uniformly (hub-dilution regime).
+                        val = (float(cand_conc_stash[k].item())
+                               if cand_conc_stash is not None else float('nan'))
                     elif name == 'kge_margin':
                         val = _margin(kge_c)
                     elif name == 'kge_entropy':
@@ -265,6 +341,11 @@ def collect(model, dataloader, device, feature_names):
     rr_rule_t = torch.tensor(rr_rule, dtype=torch.float64)
     rr_kge_t = torch.tensor(rr_kge, dtype=torch.float64)
     advantage = rr_rule_t - rr_kge_t
+    rr_alpha_t = torch.tensor(rr_alpha, dtype=torch.float64)
+    if rr_mix:
+        rr_mix_t = torch.stack(rr_mix, dim=0).to(torch.float64)   # [N, B]
+    else:
+        rr_mix_t = torch.zeros((0, beta_grid.numel()), dtype=torch.float64)
     feat_t = {name: torch.tensor(vals, dtype=torch.float64)
               for name, vals in feats.items()}
     return {
@@ -273,6 +354,9 @@ def collect(model, dataloader, device, feature_names):
         'rr_kge': rr_kge_t,
         'advantage': advantage,
         'rels': torch.tensor(rels, dtype=torch.long),
+        'rr_alpha': rr_alpha_t,
+        'rr_mix': rr_mix_t,
+        'beta_grid': beta_grid.to(torch.float64),
     }
 
 
@@ -334,6 +418,125 @@ def print_oracle_ceiling(rr_rule, rr_kge):
     print(f"  Headroom oracle-best    : {gain:+.4f}  ({rel:+.1f}% over best single)")
 
 
+def print_variance_decomposition(advantage, rels):
+    """Split rule_advantage variance into between- vs within-relation parts.
+
+    Per-relation beta assigns ONE mixing weight per relation, so it can only
+    exploit systematic BETWEEN-relation differences in rule_advantage. Any spread
+    WITHIN a relation (query-to-query) is invisible to it and is reachable only by
+    a query-adaptive head. The correlation ratio
+
+        eta^2 = between_var / total_var
+
+    is exactly the fraction of advantage variance a per-relation head could, at
+    best, organize:
+      eta^2 -> 1 : advantage is ~constant within each relation -> per-relation beta
+                   is the right granularity and has real headroom over one global mix.
+      eta^2 -> 0 : advantage lives within relations -> per-relation beta cannot help;
+                   only query-level features can.
+    """
+    print(f"\n{'-'*70}")
+    print("VARIANCE DECOMPOSITION OF rule_advantage (between vs within relation)")
+    print(f"{'-'*70}")
+    adv = advantage.double()
+    rels = rels.long()
+    N = adv.numel()
+    if N == 0:
+        print("  (no queries)")
+        return
+    grand_mean = adv.mean()
+    total_var = ((adv - grand_mean) ** 2).mean()
+    between = torch.zeros((), dtype=torch.float64)
+    within = torch.zeros((), dtype=torch.float64)
+    for rid in torch.unique(rels).tolist():
+        idx = (rels == rid).nonzero(as_tuple=True)[0]
+        mean_r = adv[idx].mean()
+        between += idx.numel() * (mean_r - grand_mean) ** 2
+        within += ((adv[idx] - mean_r) ** 2).sum()
+    between_var = (between / N).item()
+    within_var = (within / N).item()
+    tv = total_var.item()
+    eta2 = (between_var / tv) if tv > 1e-12 else float('nan')
+    print(f"  N queries                 : {N}")
+    print(f"  Total variance            : {tv:.6f}")
+    print(f"  Between-relation variance : {between_var:.6f}")
+    print(f"  Within-relation variance  : {within_var:.6f}")
+    print(f"  eta^2 (between / total)   : {eta2:.4f}")
+    print("  Reading: eta^2 high => relations differ systematically, per-relation")
+    print("           beta is the right granularity; eta^2 ~ 0 => advantage lives")
+    print("           within relations, so only query-adaptive beta can capture it.")
+
+
+def mixing_ceilings(rr_alpha, rr_mix, beta_grid, rels):
+    """Training-free MRR ceilings for each level of mixing granularity.
+
+    All convex mixes share the SAME per-query reciprocal ranks in `rr_mix`
+    (column j = beta_grid[j]); we just choose beta at different granularities:
+      - fixed_alpha_mrr : mean RR under the configured rule + alpha*kge (the baseline).
+      - global_mix_mrr  : best SINGLE beta applied to every query (one retuned mix).
+      - perrel_mix_mrr  : best beta chosen per relation (the per-relation-beta ceiling).
+      - per_query_mix   : best beta chosen per query (the absolute adaptive-beta ceiling).
+
+    Because beta = 1/(1+alpha) is included in the grid, global/per-relation/per-query
+    ceilings are all >= fixed_alpha_mrr, so the reported headrooms are non-negative
+    and decompose the total mixing prize by granularity.
+    """
+    N = rr_alpha.numel()
+    fixed_alpha_mrr = rr_alpha.mean().item() if N else float('nan')
+    per_beta_mrr = rr_mix.mean(dim=0)                       # [B]
+    gbest = int(torch.argmax(per_beta_mrr).item())
+    weighted = 0.0
+    per_rel = {}
+    for rid in torch.unique(rels).tolist():
+        idx = (rels == rid).nonzero(as_tuple=True)[0]
+        mrr_by_beta = rr_mix[idx].mean(dim=0)               # [B]
+        jb = int(torch.argmax(mrr_by_beta).item())
+        weighted += idx.numel() * mrr_by_beta[jb].item()
+        per_rel[rid] = {
+            'best_beta': beta_grid[jb].item(),
+            'mrr_mix': mrr_by_beta[jb].item(),
+            'n': idx.numel(),
+        }
+    return {
+        'fixed_alpha_mrr': fixed_alpha_mrr,
+        'global_mix_mrr': per_beta_mrr[gbest].item(),
+        'global_best_beta': beta_grid[gbest].item(),
+        'perrel_mix_mrr': (weighted / N) if N else float('nan'),
+        'per_query_mix_mrr': rr_mix.max(dim=1).values.mean().item() if N else float('nan'),
+        'per_rel': per_rel,
+    }
+
+
+def print_mixing_oracle(ceil, alpha):
+    """Report the mixing ceilings and headroom of each granularity over fixed alpha."""
+    fa = ceil['fixed_alpha_mrr']
+    gm = ceil['global_mix_mrr']
+    pr = ceil['perrel_mix_mrr']
+    pq = ceil['per_query_mix_mrr']
+
+    def _pct(x):
+        return (x / fa * 100.0) if fa > 0 else float('nan')
+
+    print(f"\n{'-'*70}")
+    print("MIXING ORACLE (convex beta grid; baseline = configured fixed alpha)")
+    print(f"{'-'*70}")
+    print(f"  Fixed alpha (rule + {alpha:g}*kge) : {fa:.4f}   <- baseline")
+    print(f"  Best GLOBAL beta mix          : {gm:.4f}   (beta*={ceil['global_best_beta']:.3f})")
+    print(f"  Per-RELATION beta mix (oracle): {pr:.4f}")
+    print(f"  Per-QUERY beta mix (oracle)   : {pq:.4f}   (ceiling for any adaptive head)")
+    print(f"  Headroom  per-relation - alpha : {pr - fa:+.4f}  ({_pct(pr - fa):+.1f}%)"
+          "   <- per-relation prize")
+    print(f"  Headroom  global mix   - alpha : {gm - fa:+.4f}  ({_pct(gm - fa):+.1f}%)"
+          "   (is a single retuned alpha enough?)")
+    print(f"  Headroom  per-relation - global: {pr - gm:+.4f}  ({_pct(pr - gm):+.1f}%)"
+          "   (value of per-relation granularity)")
+    print(f"  Headroom  per-query    - perrel: {pq - pr:+.4f}  ({_pct(pq - pr):+.1f}%)"
+          "   (extra prize only query-adaptive can get)")
+    print("  Reading: 'per-relation prize' > 0 means relations want different mixes")
+    print("           than the configured alpha. If per-relation ~ global mix, one")
+    print("           retuned global alpha already captures it (no per-relation need).")
+
+
 def relation_label(rid, id2relation, relation_size):
     """Human-readable name for a (possibly inverse) relation id."""
     if rid < relation_size:
@@ -342,64 +545,62 @@ def relation_label(rid, id2relation, relation_size):
     return f"{base}_inv"
 
 
-def per_relation_report(rels, rr_rule, rr_kge, advantage,
+def per_relation_report(rels, rr_rule, rr_kge, advantage, ceil,
                         id2relation, relation_size, top_k, csv_path=None):
-    """Per-relation advantage breakdown + the per-relation routing ceiling.
+    """Per-relation breakdown + the per-relation MIXING ceiling vs fixed alpha.
 
-    Per-relation beta is a *coarse* router: it can pick a different rule/KGE
-    balance per relation, but cannot distinguish queries within a relation.
-    Its ceiling is therefore mean over queries of the better *per-relation*
-    scorer:
+    Per-relation beta is a *coarse* router: it picks one rule/KGE balance per
+    relation but cannot distinguish queries within a relation. Its ceiling is the
+    n-weighted mean of the best per-relation convex mix (grid-searched in
+    `mixing_ceilings`):
 
-        perrel_oracle = sum_r n_r * max(MRR_rule_r, MRR_kge_r) / N
+        perrel_oracle = sum_r n_r * max_beta MRR_r(beta*rule + (1-beta)*kge) / N
 
-    Comparing this to the global best-single tells you whether a per-relation
-    head has anything to exploit at all (gap > 0 means some relations are
-    rule-favored and others KGE-favored).
+    We compare it to the configured fixed-alpha baseline (rule + alpha*kge), NOT
+    to the better pure scorer, because fixed alpha is the method a per-relation
+    head must actually beat. Each relation also reports `best_beta`
+    (->1 rule-leaning, ->0 kge-leaning) and `mrr_mix` (its MRR at that beta).
     """
     N = rels.numel()
-    uniq = torch.unique(rels).tolist()
+    per_rel = ceil['per_rel']
+    fixed_alpha_mrr = ceil['fixed_alpha_mrr']
+    perrel_oracle = ceil['perrel_mix_mrr']
+    gap = perrel_oracle - fixed_alpha_mrr
+
     stats = []
-    weighted_oracle = 0.0
-    for rid in uniq:
+    for rid in torch.unique(rels).tolist():
         idx = (rels == rid).nonzero(as_tuple=True)[0]
-        nr = idx.numel()
-        mrr_rule = rr_rule[idx].mean().item()
-        mrr_kge = rr_kge[idx].mean().item()
-        adv = advantage[idx].mean().item()
-        frac = (advantage[idx] > 0).float().mean().item()
-        weighted_oracle += nr * max(mrr_rule, mrr_kge)
+        info = per_rel.get(rid, {'best_beta': float('nan'), 'mrr_mix': float('nan')})
         stats.append({
             'rel_id': rid,
             'relation': relation_label(rid, id2relation, relation_size),
-            'n': nr,
-            'mrr_rule': mrr_rule,
-            'mrr_kge': mrr_kge,
-            'advantage': adv,
-            'frac_rule_gt_kge': frac,
+            'n': idx.numel(),
+            'mrr_rule': rr_rule[idx].mean().item(),
+            'mrr_kge': rr_kge[idx].mean().item(),
+            'advantage': advantage[idx].mean().item(),
+            'frac_rule_gt_kge': (advantage[idx] > 0).float().mean().item(),
+            'best_beta': info['best_beta'],
+            'mrr_mix': info['mrr_mix'],
         })
-    perrel_oracle = weighted_oracle / N if N > 0 else float('nan')
-    best_single = max(rr_rule.mean().item(), rr_kge.mean().item())
-    gap = perrel_oracle - best_single
 
     n_rule_fav = sum(1 for s in stats if s['advantage'] > 0)
     n_kge_fav = sum(1 for s in stats if s['advantage'] < 0)
 
     print(f"\n{'-'*70}")
-    print("PER-RELATION ROUTING (ceiling for per-relation beta)")
+    print("PER-RELATION ROUTING (ceiling for per-relation beta vs fixed alpha)")
     print(f"{'-'*70}")
-    print(f"  Relations (with queries): {len(stats)}")
+    print(f"  Relations (with queries)  : {len(stats)}")
     print(f"  Rule-favored / KGE-favored: {n_rule_fav} / {n_kge_fav}")
-    print(f"  Best single scorer       : {best_single:.4f}")
-    print(f"  Per-relation oracle      : {perrel_oracle:.4f}  "
-          f"(pick better scorer per relation)")
-    print(f"  Headroom perrel-best     : {gap:+.4f}  "
-          f"({(gap / best_single * 100.0) if best_single > 0 else float('nan'):+.1f}%)")
+    print(f"  Fixed alpha baseline      : {fixed_alpha_mrr:.4f}")
+    print(f"  Per-relation mixing oracle: {perrel_oracle:.4f}  "
+          f"(best convex beta per relation)")
+    print(f"  Headroom perrel - alpha   : {gap:+.4f}  "
+          f"({(gap / fixed_alpha_mrr * 100.0) if fixed_alpha_mrr > 0 else float('nan'):+.1f}%)")
 
     stats.sort(key=lambda s: s['advantage'], reverse=True)
-    name_w = 48
+    name_w = 40
     header = (f"  {'relation':<{name_w}} {'n':>6} {'MRR_rule':>9} {'MRR_kge':>9} "
-              f"{'advantage':>10} {'rule>kge':>9}")
+              f"{'advantage':>10} {'best_beta':>9} {'mrr_mix':>9} {'rule>kge':>9}")
 
     def _fit(name, width):
         # Middle-truncate so the discriminative suffix (e.g. '_inv') survives.
@@ -413,7 +614,8 @@ def per_relation_report(rels, rr_rule, rr_kge, advantage,
         for s in rows:
             print(f"  {_fit(s['relation'], name_w):<{name_w}} {s['n']:>6d} "
                   f"{s['mrr_rule']:>9.4f} {s['mrr_kge']:>9.4f} "
-                  f"{s['advantage']:>+10.4f} {s['frac_rule_gt_kge']:>9.2f}")
+                  f"{s['advantage']:>+10.4f} {s['best_beta']:>9.3f} "
+                  f"{s['mrr_mix']:>9.4f} {s['frac_rule_gt_kge']:>9.2f}")
 
     k = min(top_k, len(stats))
     print(f"\n  Top {k} RULE-favored relations:")
@@ -441,16 +643,31 @@ def main():
     parser.add_argument('--config', required=True, help='Path to model config json.')
     parser.add_argument('--checkpoint', required=True,
                         help='Grounding checkpoint (same one beta training uses).')
-    parser.add_argument('--split', choices=['test', 'valid'], default='test',
-                        help='Which split to screen on (default: test).')
+    parser.add_argument('--split', choices=['test', 'valid'], default='valid',
+                        help='Which split to screen on (default: valid). Use '
+                             'valid for feature/architecture selection -- '
+                             'screening on test and then reporting the chosen '
+                             'beta head on test is selection ("peeking") '
+                             'leakage. Reserve test for a single final eval.')
     parser.add_argument(
         '--features',
-        default='density,num_rules,kge_margin,kge_entropy,kge_max,'
-                'rule_margin,rule_entropy',
+        default='density,num_rules,conf_rules,top_rule_confidence,'
+                'rule_concentration,cand_concentration,'
+                'kge_margin,kge_entropy,kge_max,rule_margin,rule_entropy',
         help='Comma-separated features. Available: density, num_rules, '
-             'kge_margin, kge_entropy, kge_max, rule_margin, rule_entropy, '
-             'rule_kge_disagreement.')
+             'conf_rules, top_rule_confidence, rule_concentration, '
+             'cand_concentration, kge_margin, kge_entropy, kge_max, '
+             'rule_margin, rule_entropy, rule_kge_disagreement.')
     parser.add_argument('--num_buckets', type=int, default=5)
+    parser.add_argument('--alpha', type=float, default=None,
+                        help='Fixed-alpha baseline weight for the rule + alpha*kge '
+                             'mix that per-relation beta must beat. Defaults to the '
+                             "config's per-dataset 'alpha' field.")
+    parser.add_argument('--beta_grid_steps', type=int, default=21,
+                        help='Number of evenly-spaced betas in [0,1] for the convex '
+                             'mixing grid (beta*rule + (1-beta)*kge). The alpha-'
+                             'equivalent beta = 1/(1+alpha) is always added so the '
+                             'mixing ceilings are >= the fixed-alpha baseline.')
     parser.add_argument('--promising_r', type=float, default=0.1,
                         help='|Pearson r| threshold for the "promising" flag.')
     parser.add_argument('--batch_size', type=int, default=None,
@@ -480,6 +697,18 @@ def main():
     config = load_config(args.config)
     if isinstance(config, (list, tuple)):
         config = config[0]
+
+    # Fixed-alpha baseline: prefer the CLI override, else the config's per-dataset
+    # alpha. The convex grid always includes the alpha-equivalent beta=1/(1+alpha),
+    # so every mixing ceiling is guaranteed to dominate this baseline.
+    alpha = args.alpha if args.alpha is not None else float(getattr(config, 'alpha', 3.0))
+    beta_alpha = 1.0 / (1.0 + alpha)
+    beta_grid = torch.unique(torch.cat([
+        torch.linspace(0.0, 1.0, args.beta_grid_steps),
+        torch.tensor([beta_alpha], dtype=torch.float32),
+    ]))
+    print(f"Fixed-alpha baseline: rule + {alpha:g}*kge  (alpha-equiv beta={beta_alpha:.3f})")
+    print(f"Convex beta grid: {beta_grid.numel()} points in [0,1] (incl. alpha-equiv)")
 
     data_path = config.data_path
     if not os.path.isabs(data_path):
@@ -526,6 +755,10 @@ def main():
     model = model.to(device)
     model.eval()
     model.eval_compute_rule_weight(device)
+    # Per-rule confidence (RulE plausibility) for the 'conf_rules' feature. Safe
+    # no-op for model variants that lack it (conf_rules then reads as NaN).
+    if hasattr(model, 'eval_compute_rule_confidence'):
+        model.eval_compute_rule_confidence(device)
 
     batch_size = args.batch_size or getattr(config, 'g_batch_size', 8)
     if args.split == 'test':
@@ -538,11 +771,17 @@ def main():
     print(f"FEATURE-VALIDITY SCREEN | dataset={dataset_name} | split={args.split}")
     print(f"{'='*70}")
 
-    data = collect(model, dataloader, device, feature_names)
+    data = collect(model, dataloader, device, feature_names, alpha, beta_grid)
     advantage = data['advantage']
     rr_rule = data['rr_rule']
     rr_kge = data['rr_kge']
     n = advantage.numel()
+
+    # Training-free mixing ceilings (fixed-alpha baseline + global/per-relation/
+    # per-query best convex beta). Computed once; reused by the mixing-oracle
+    # report and the per-relation table.
+    ceil = mixing_ceilings(data['rr_alpha'], data['rr_mix'],
+                           data['beta_grid'], data['rels'])
 
     # ---- Global anchors (reproduce the training-time diagnostic) ----
     mean_adv = advantage.mean().item()
@@ -555,6 +794,15 @@ def main():
 
     # ---- Oracle ceiling: max gain available to ANY per-query router ----
     print_oracle_ceiling(rr_rule, rr_kge)
+
+    # ---- Variance decomposition: is the advantage signal between- or within-
+    #      relation? (Upper-bounds what a per-relation head could organize.) ----
+    print_variance_decomposition(advantage, data['rels'])
+
+    # ---- Mixing oracle: fixed-alpha baseline vs best global / per-relation /
+    #      per-query convex beta. The headline "per-relation prize" is
+    #      per-relation oracle MRR minus the configured fixed-alpha MRR. ----
+    print_mixing_oracle(ceil, alpha)
 
     # ---- Per-feature correlation table ----
     rows = []
@@ -628,7 +876,7 @@ def main():
         else:
             perrel_csv = out_path + '_per_relation.csv'
         per_relation_report(
-            data['rels'], rr_rule, rr_kge, advantage,
+            data['rels'], rr_rule, rr_kge, advantage, ceil,
             graph.id2relation, graph.relation_size,
             top_k=args.per_relation_topk, csv_path=perrel_csv,
         )

@@ -39,13 +39,17 @@ echo ""
 
 # ── Configuration ──────────────────────────────────────────────────────────────
 # Reuse the grounding checkpoint produced by the original MLP run -- the screen
-# scores test queries with the same rule + KGE heads beta training sees.
+# scores valid queries with the same rule + KGE heads beta training sees.
+# Screen on VALID (not test): the screen drives feature/architecture selection
+# for the adaptive beta head, so using test here and then reporting that head on
+# test would be selection ("peeking") leakage. Test stays reserved for the final
+# one-shot evaluation in train_beta_grounding.
 ORIG_OUTPUT="$HOME/RulE/outputs/umls"
 GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 
 CONFIG="$HOME/RulE/config/umls_hpc.json"
 
-SAVE_PATH="$HOME/RulE/outputs/feature_validity_umls"
+SAVE_PATH="$HOME/RulE/outputs/feature_validity_umls_perrel"
 mkdir -p "${SAVE_PATH}"
 
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
@@ -68,11 +72,11 @@ cd "$HOME/RulE/RulE_original/src"
 python3 -u "$HOME/RulE/scripts/feature_validity_screen.py" \
     --config "${CONFIG}" \
     --checkpoint "${GROUNDING_CHECKPOINT}" \
-    --split test \
-    --features "density,num_rules,kge_margin,kge_entropy,kge_max,rule_margin,rule_entropy" \
+    --split valid \
+    --features "density,num_rules,conf_rules,kge_margin,kge_entropy,kge_max,rule_margin,rule_entropy,rule_kge_disagreement, top_rule_confidence, rule_concentration, cand_concentration" \
     --num_buckets 5 \
     --output "${SAVE_PATH}/feature_validity.csv" \
-    --seed 42 \
+    --seed 42\
     2>&1 | tee "${SAVE_PATH}/feature_validity.log"
 
 RC=${PIPESTATUS[0]}

@@ -161,6 +161,7 @@ run_rsync "${DEST_BASE}/config/" \
   "${SCRIPT_DIR}/config/wn18rr_config.json" \
   "${SCRIPT_DIR}/config/umls_hpc.json" \
   "${SCRIPT_DIR}/config/wn18rr_hpc.json" \
+  "${SCRIPT_DIR}/config/wn18rr_gat_hpc.json" \
   "${SCRIPT_DIR}/config/fb15k237_hpc.json" \
   "${SCRIPT_DIR}/config/family_comparison_hpc.json" \
   || OVERALL_EXIT=$?
@@ -176,6 +177,9 @@ run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/feature_validity_wn18rr.slurm" \
   "${SCRIPT_DIR}/feature_validity_fb15k.slurm" \
   "${SCRIPT_DIR}/feature_validity_family.slurm" \
+  "${SCRIPT_DIR}/additive_umls_paper_sum.slurm" \
+  "${SCRIPT_DIR}/additive_umls_paper_sum_fm.slurm" \
+  "${SCRIPT_DIR}/additive_umls_paper_sum_fm_nam.slurm" \
   "${SCRIPT_DIR}/additive_lever1_umls.slurm" \
   "${SCRIPT_DIR}/additive_fm_umls.slurm" \
   "${SCRIPT_DIR}/additive_nam_fm_umls.slurm" \
@@ -185,12 +189,14 @@ run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr_numnorm_rel.slurm" \
   "${SCRIPT_DIR}/beta_ce_perrel_wn18rr.slurm" \
   "${SCRIPT_DIR}/beta_ce_perrel_fb15k237.slurm" \
+  "${SCRIPT_DIR}/beta_ce_perrel_umls.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls_densunnorm.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_umls_densnorm.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only_umls.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only_umls_no_dst.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only_umls_rule_attn.slurm" \
+  "${SCRIPT_DIR}/gat_grounding_only_wn18rr_rule_attn.slurm" \
   "${SCRIPT_DIR}/gat_grounding_only.slurm" \
   "${SCRIPT_DIR}/rule_comparison_gpu.slurm" \
   "${SCRIPT_DIR}/rule_original_wn18rr.slurm" \

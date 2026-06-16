@@ -45,7 +45,7 @@ GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 
 CONFIG="$HOME/RulE/config/family_comparison_hpc.json"
 
-SAVE_PATH="$HOME/RulE/outputs/feature_validity_family"
+SAVE_PATH="$HOME/RulE/outputs/feature_validity_family_grid"
 mkdir -p "${SAVE_PATH}"
 
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
@@ -68,8 +68,8 @@ cd "$HOME/RulE/RulE_original/src"
 python3 -u "$HOME/RulE/scripts/feature_validity_screen.py" \
     --config "${CONFIG}" \
     --checkpoint "${GROUNDING_CHECKPOINT}" \
-    --split test \
-    --features "density,num_rules,kge_margin,kge_entropy,kge_max,rule_margin,rule_entropy" \
+    --split valid \
+    --features "density,num_rules,kge_margin,kge_entropy,kge_max,rule_margin,rule_entropy, conf_rules, rule_kge_disagreement, top_rule_confidence, rule_concentration, cand_concentration" \
     --num_buckets 5 \
     --output "${SAVE_PATH}/feature_validity.csv" \
     --seed 42 \

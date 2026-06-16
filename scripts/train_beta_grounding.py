@@ -28,11 +28,14 @@ def parse_args():
                        help='Fixed alpha for comparison baseline')
     # Adaptive-beta feature + score scaling -----------------------------------
     parser.add_argument('--feature', type=str, default='density',
-                       choices=['density', 'num_rules'],
+                       choices=['density', 'num_rules', 'kge_max'],
                        help="Per-query feature the adaptive head conditions on. "
                             "'density': fraction of candidate entities with >=1 "
                             "rule fired. 'num_rules': fraction of the relation's "
-                            "rules that fired for the (h, r) query.")
+                            "rules that fired for the (h, r) query. "
+                            "'kge_max': max KGE score over filtered candidates "
+                            "(requires --standardize_feature; the raw value is "
+                            "dataset/relation-scale-dependent).")
     parser.add_argument('--normalize_scores', action='store_true',
                        help='Per-query (over entities) divide rule_logits and '
                             'kge_score by their std before mixing, so the convex '
@@ -137,13 +140,16 @@ def evaluate(model, dataloader, device, use_beta=False, adaptive_beta=False, alp
             # Forward pass: raw rule scores (with bias added, see model.forward)
             rule_logits, mask = model(all_h, all_r, None)
 
-            # Per-query adaptive feature (density or num_rules): read from the
-            # model's stash via get_query_feature() -- the *same* signal that
-            # compute_adaptive_beta conditions on, so bucket edges line up.
+            # Compute KGE scores before reading the adaptive feature, so that
+            # 'kge_max' (which needs update_kge_stash) is populated in time.
+            kge_score = model.compute_g_KGE(all_h, all_r)
+            model.update_kge_stash(kge_score, flag)
+
+            # Per-query adaptive feature (density, num_rules, or kge_max): read
+            # from the model's stash via get_query_feature() -- the same signal
+            # that compute_adaptive_beta conditions on, so bucket edges line up.
             if return_per_query:
                 concat_feature.append(model.get_query_feature().detach())
-
-            kge_score = model.compute_g_KGE(all_h, all_r)
 
             # Per-query Spearman corr between rule and KGE rankings, over all
             # candidate entities (no flag filter for speed -- flag drops a
@@ -325,6 +331,9 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
         with torch.no_grad():
             rule_logits, mask = model(all_h, all_r, None)
             kge_score = model.compute_g_KGE(all_h, all_r)
+            # Populate _last_kge_max so 'kge_max' feature is ready before
+            # compute_adaptive_beta. Safe no-op for density/num_rules.
+            model.update_kge_stash(kge_score, flag)
             # Per-query score normalization (same transform as evaluate). The
             # adaptive feature is read from the model stash, not these tensors,
             # so normalizing here does not touch the feature.
@@ -418,7 +427,11 @@ def compute_feature_stats(model, dataloader, device):
             all_h, all_r, all_t, flag = batch
             all_h = all_h.squeeze(0).to(device)
             all_r = all_r.squeeze(0).to(device)
+            flag = flag.squeeze(0).to(device)
             model(all_h, all_r, None)
+            if model.feature_name == 'kge_max':
+                kge_score = model.compute_g_KGE(all_h, all_r)
+                model.update_kge_stash(kge_score, flag)
             feats.append(model.get_query_feature().detach().cpu())
     feats = torch.cat(feats, dim=0).float()
     mean = feats.mean()

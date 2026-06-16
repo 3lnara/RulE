@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=rule_original_umls
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --constraint=v100
 #SBATCH --time=48:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
@@ -36,7 +35,7 @@ echo ""
 # ── Configuration ──────────────────────────────────────────────────────────────
 CONFIG="$HOME/RulE/config/umls_hpc.json"
 PRETRAIN_CHECKPOINT="$HOME/RulE/outputs/umls/checkpoint"
-SAVE_PATH="/vast.mnt/home/20252643/RulE/outputs/umls"
+SAVE_PATH="/vast.mnt/home/20252643/RulE/outputs/umls_binary"
 mkdir -p "${SAVE_PATH}"
 
 echo "Config     : ${CONFIG}"
@@ -51,8 +50,8 @@ TRAIN_START=$(date +%s)
 cd "$HOME/RulE/RulE_original/src"
 python3 -u main.py \
     --init_checkpoint_config "${CONFIG}"\
-    # --skip_pretrain \
-    # --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
+    --skip_pretrain \
+    --pretrain_checkpoint "${PRETRAIN_CHECKPOINT}" \
 
 TRAIN_RC=$?
 TRAIN_END=$(date +%s)

@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=feature_validity_fb15k
 #SBATCH --partition=mcs.gpu.q
-#SBATCH --constraint=v100
 #SBATCH --time=06:00:00
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=10
@@ -46,7 +45,7 @@ GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 
 CONFIG="$HOME/RulE/config/fb15k237_hpc.json"
 
-SAVE_PATH="$HOME/RulE/outputs/feature_validity_fb15k"
+SAVE_PATH="$HOME/RulE/outputs/feature_validity_fb15k_grid"
 mkdir -p "${SAVE_PATH}"
 
 # FB15k-237 has 14 541 entities; [32, 14541] forward is ~0.94 GB, safe on V100.
@@ -73,8 +72,8 @@ cd "$HOME/RulE/RulE_original/src"
 python3 -u "$HOME/RulE/scripts/feature_validity_screen.py" \
     --config "${CONFIG}" \
     --checkpoint "${GROUNDING_CHECKPOINT}" \
-    --split test \
-    --features "density,num_rules,kge_margin,kge_entropy,kge_max,rule_margin,rule_entropy" \
+    --split valid \
+    --features "density,num_rules,kge_margin,kge_entropy,kge_max,rule_margin,rule_entropy, conf_rules, rule_kge_disagreement, top_rule_confidence, rule_concentration, cand_concentration" \
     --num_buckets 5 \
     --batch_size "${BATCH_SIZE}" \
     --output "${SAVE_PATH}/feature_validity.csv" \
