@@ -40,7 +40,8 @@ def parse_args(args=None):
     parser.add_argument('--cuda', action='store_true',default=False, help='use GPU')
     parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
 
-    parser.add_argument('--seed',default=800, type=int, help='seed')
+    parser.add_argument('--seed', default=-1, type=int,
+                        help='Random seed. -1 (default) means use the value from the JSON config.')
     
     # pre train process (KGE + rulE)
     parser.add_argument('-b', '--batch_size', default=256, type=int)
@@ -106,6 +107,11 @@ def parse_args(args=None):
                              'score is purely Sum_R w_R * count_R[t] (raw counts, no '
                              'popularity prior). Implies --simple_aggregation. The bias is '
                              'frozen, so this mode has no trainable parameters (fixed scorer).')
+    parser.add_argument('--clamp_negative_confidence', action='store_true', default=False,
+                        help='Clamp frozen per-rule RulE confidences to >=0 '
+                             '(w_R = max(0, w_R)) before additive aggregation, zeroing out '
+                             'negative-confidence rules. Only affects '
+                             '--simple_aggregation / --paper_sum runs.')
 
     return parser.parse_args(args)
 
@@ -118,7 +124,10 @@ def main():
     cli_simple_aggregation = args.simple_aggregation
     cli_paper_sum = args.paper_sum
     cli_no_bias = args.no_bias
+    cli_clamp_negative_confidence = args.clamp_negative_confidence
     cli_num_iters = args.num_iters  # None-sentinel below: argparse default is 20
+    # Sentinel: argparse default is -1 meaning "not provided, use config value".
+    cli_seed = args.seed if args.seed != -1 else None
 
     # read the given config
     if args.init_checkpoint_config:
@@ -131,6 +140,7 @@ def main():
         args.save_path = cli_save_path
     args.paper_sum = cli_paper_sum
     args.no_bias = cli_no_bias
+    args.clamp_negative_confidence = cli_clamp_negative_confidence
     # --paper_sum and --no_bias both force simple_aggregation
     if cli_paper_sum or cli_no_bias:
         args.simple_aggregation = True
@@ -139,6 +149,9 @@ def main():
     # CLI --num_iters overrides the JSON config value when explicitly provided.
     if cli_num_iters is not None:
         args.num_iters = cli_num_iters
+    # CLI --seed overrides the JSON config value when explicitly provided.
+    if cli_seed is not None:
+        args.seed = cli_seed
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:

@@ -416,6 +416,11 @@ class GroundTrainer(object):
                     scores, _ = self.model.add_ruleE(rules.unsqueeze(1), masks)
                     init_logits.append(scores.squeeze(1))
             init_logits = torch.cat(init_logits, dim=0).detach()
+            if getattr(args, 'clamp_negative_confidence', False):
+                n_neg = int((init_logits < 0).sum().item())
+                init_logits = init_logits.clamp(min=0.0)
+                logging.info('[clamp] zeroed %d/%d negative-confidence rules '
+                             '(w_R = max(0, w_R)).' % (n_neg, init_logits.numel()))
             self.model.register_buffer('rule_weight_logit', init_logits.clone())
             self.model.simple_aggregation = True
             self.model.paper_sum = getattr(args, 'paper_sum', False)
