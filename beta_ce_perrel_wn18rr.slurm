@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=beta_ce_perrel_wn18rr_densnorm
+#SBATCH --job-name=beta_ce_perrel_wn18rr_kgeent
 #SBATCH --partition=mcs.gpu.q
 #SBATCH --constraint=v100
 #SBATCH --time=12:00:00
@@ -7,33 +7,36 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
 #SBATCH --gpus=1
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH --array=0-2
+#SBATCH --output=%x_%A_%a.out
+#SBATCH --error=%x_%A_%a.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=e.yerbolatova@student.tue.nl
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Per-relation mixing-weight (beta) training with a CROSS-ENTROPY loss.
+# Adaptive kge_entropy mixing-weight (beta) training — WN18RR, multi-seed.
 #
-# This is the cross-entropy counterpart to adaptive_beta_only_wn18rr.slurm.
-# Two deliberate differences from that script:
-#   1. --loss ce       : trains beta[r] with filtered softmax cross-entropy
-#                        (-log softmax(score)[true tail] over the full filtered
-#                        candidate set) instead of the pairwise margin/hinge.
-#                        This is the listwise objective RulE's GroundTrainer used
-#                        to fit the rule scorer and matches the filtered-ranking
-#                        eval protocol. Because CE consumes EVERY candidate, the
-#                        negative-sampling knobs (--neg_sampling/--num_negatives/
-#                        --mixed_hard_frac) are irrelevant and omitted.
-#   2. --skip_adaptive : trains/evaluates the per-relation intercept beta[r]
-#                        ONLY -- stages [5]/[6]/[7] (the query-adaptive
-#                        beta_density head) are removed entirely.
+# Feature: kge_entropy — Shannon entropy of softmax over filtered KGE scores.
+# High entropy = KGE is uncertain; low entropy = KGE is confident.
+# This feature lives in the per-query adaptive slope (stage [6]); the per-
+# relation intercept (stage [3]) is trained first as a baseline.
 #
-# Ablation here therefore varies the two things that still matter under CE:
-#   --label_smoothing  (eps; 0.0 = hard target, 0.3 = the grounding default)
-#   --beta_l2          (shrink beta[r] toward 0 -> sigmoid 0.5, neutral routing)
+# Multi-seed job array (--array=0-2) runs seeds 42, 43, 44 in parallel,
+# each in its own output directory. Fixed config (ls=0.3, l2=0.01) matched
+# to WN18RR's grounding-stage smoothing for reproducibility across seeds.
+#
+# Key settings:
+#   --feature kge_entropy     : the new per-query adaptive feature.
+#   --standardize_feature     : z-scores kge_entropy on the beta-train split
+#                               so beta_density is dataset-scale-invariant.
+#   --loss ce                 : filtered softmax cross-entropy (listwise).
+#   --density_lr 0.01         : LR for the single beta_density scalar.
+#   FIXED_ALPHA=1.0           : WN18RR's published operating point.
 # ─────────────────────────────────────────────────────────────────────────────
+
+SEEDS=(42 43 44)
+SEED="${SEEDS[$SLURM_ARRAY_TASK_ID]}"
 
 # ── GPU info ───────────────────────────────────────────────────────────────────
 echo "=== GPU info ==="
@@ -61,34 +64,30 @@ echo "PyTorch : $(python3 -c 'import torch; print(torch.__version__, "| CUDA:", 
 echo ""
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Reuse the grounding checkpoint produced by the original MLP run -- the same
-# rule + KGE heads the margin runs trained beta on top of.
 ORIG_OUTPUT="$HOME/RulE/outputs/wn18rr_original"
 PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
 GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 
-# Config file — same one used for the original run
 CONFIG="$HOME/RulE/config/wn18rr_hpc.json"
 
-# Output directory for this cross-entropy per-relation run
-SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_wn18rr_nonorm"
+SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_wn18rr_kgeentropy/seed${SEED}"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
-# Beta hyper-parameters (stage 3 only; adaptive stage is skipped)
 BETA_EPOCHS=10
 BETA_LR=0.001
-FIXED_ALPHA=1.0   # baseline alpha for the comparison table
-SEED=42
-
-# Root directory for per-variant subdirectories
+DENSITY_LR=0.01
+FIXED_ALPHA=1.0
 ABLATION_ROOT="${SAVE_PATH}"
 
+echo "Array task / seed      : ${SLURM_ARRAY_TASK_ID} / ${SEED}"
 echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
 echo "Config                 : ${CONFIG}"
 echo "Save path              : ${SAVE_PATH}"
-echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR}"
-echo "Loss                   : cross-entropy (per-relation only, adaptive disabled)"
+echo "Feature                : kge_entropy (standardized, per-query adaptive)"
+echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR} (intercept), ${DENSITY_LR} (density)"
+echo "Fixed alpha (baseline) : ${FIXED_ALPHA}"
+echo "Loss                   : cross-entropy"
 echo "Started                : $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
@@ -115,27 +114,21 @@ GPU_MON_PID=$!
 echo "GPU memory monitor PID : ${GPU_MON_PID}  (log: ${GPU_LOG})"
 echo ""
 
-# ── Shared arguments for every variant ────────────────────────────────────────
-# --loss ce + --skip_adaptive are the defining flags of this script. The score
-# normalization / feature standardization are kept identical to the margin runs
-# so the only changed factor versus those logs is the loss function.
+# ── Shared arguments ───────────────────────────────────────────────────────────
 COMMON_ARGS=(
     --config             "${CONFIG}"
     --checkpoint         "${GROUNDING_CHECKPOINT}"
     --epochs             "${BETA_EPOCHS}"
     --lr                 "${BETA_LR}"
+    --density_lr         "${DENSITY_LR}"
     --alpha              "${FIXED_ALPHA}"
     --seed               "${SEED}"
     --loss               ce
-    --skip_adaptive
+    --feature            kge_entropy
     --standardize_feature
-    --feature            density
 )
 
 # ── run_variant <name> [extra args…] ──────────────────────────────────────────
-# Runs train_beta_grounding_chunked.py with COMMON_ARGS + any extra args.
-# Each variant gets its own subdirectory under ABLATION_ROOT and its own
-# beta.pt / training.log so results don't overwrite each other.
 run_variant() {
     local name="$1"
     shift
@@ -173,20 +166,9 @@ run_variant() {
 cd "$HOME/RulE/RulE_original/src"
 TRAIN_START=$(date +%s)
 
-# Plain CE, hard target -- the direct margin -> cross-entropy swap.
-# run_variant "ce_ls0_l2_0" \
-#     --label_smoothing 0.0 \
-#     --beta_l2 0.0
-# # CE + label smoothing 0.3 (matches the grounding-stage 'smoothing' default).
-# run_variant "ce_ls0.3_l2_0" \
-#     --label_smoothing 0.3 \
-#     --beta_l2 0.0
-# # CE + small L2 shrink toward neutral routing (beta -> 0.5).
-# run_variant "ce_ls0_l2_0.01" \
-#     --label_smoothing 0.0 \
-#     --beta_l2 0.01
-# # CE + label smoothing + L2.
-run_variant "ce_ls0.3_l2_0.01" \
+# Fixed config: label smoothing matched to WN18RR's grounding objective (0.3)
+# + small L2 shrink toward neutral routing.
+run_variant "kgeentropy_ls0.3_l2_0.01" \
     --label_smoothing 0.3 \
     --beta_l2 0.01
 
@@ -200,7 +182,7 @@ wait "${GPU_MON_PID}" 2>/dev/null
 # ── Timing summary ─────────────────────────────────────────────────────────────
 echo ""
 echo "=================================================="
-echo "  All variants complete"
+echo "  All variants complete  (seed=${SEED})"
 echo "=================================================="
 printf "  Total wall time : %dh%02dm%02ds\n" \
     $(( TRAIN_WALL / 3600 )) $(( (TRAIN_WALL % 3600) / 60 )) $(( TRAIN_WALL % 60 ))

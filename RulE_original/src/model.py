@@ -17,6 +17,29 @@ def _mem(tag):
     reserv = torch.cuda.memory_reserved()   / 1024**3
     logging.info(f"[MEM] {tag:55s} alloc={alloc:.3f}GB  peak={peak:.3f}GB  reserved={reserv:.3f}GB")
 
+def _concentration_from_mass(mass, dim):
+    """1 - normalized entropy of a nonneg mass tensor along `dim`, in [0,1].
+
+    Normalized by log(#nonzero active items) so it measures peakedness
+    independent of count: one active item -> 1; uniform over k items -> 0;
+    no grounding (total == 0) -> 0.
+
+    Args:
+        mass: float tensor, values >= 0.
+        dim:  axis along which to compute concentration (int).
+    Returns:
+        concentration tensor with `dim` squeezed out.
+    """
+    total = mass.sum(dim=dim, keepdim=True)
+    p = mass / total.clamp_min(1e-12)
+    ent = -(p * p.clamp_min(1e-12).log()).sum(dim=dim)
+    k = (mass > 0).sum(dim=dim)
+    logk = k.float().clamp_min(1).log()
+    norm_ent = torch.where(logk > 0, ent / logk.clamp_min(1e-12), torch.zeros_like(ent))
+    conc = 1.0 - norm_ent
+    return torch.where(total.squeeze(dim) > 0, conc, torch.zeros_like(conc))
+
+
 class RulE(torch.nn.Module):
     def __init__(self, graph, p_norm, mlp_rule_dim, gamma_fact, gamma_rule, hidden_dim, device, dataset,
                  feature_name='density', use_per_relation=True):
@@ -86,8 +109,43 @@ class RulE(torch.nn.Module):
         #                       self.bias variance).
         #   _last_num_rules   : float [batch], fraction of the relation's rules
         #                       that fired for each query (the 'num_rules' signal).
+        #   _last_conf_rules  : float [batch], fraction of the relation's total
+        #                       rule-confidence MASS that fired for each query
+        #                       (the 'conf_rules' signal). Requires
+        #                       eval_compute_rule_confidence() to have run;
+        #                       otherwise left None.
+        #   _last_top_rule_conf : float [batch], max rule_confidence among rules
+        #                       that fired for each query (the 'top_rule_confidence'
+        #                       signal). 0 if no rule fired. Requires
+        #                       eval_compute_rule_confidence(); else None.
+        #   _last_rule_concentration : float [batch], 1 - normalized_entropy
+        #                       over per-rule grounding mass (the 'rule_concentration'
+        #                       signal). High = one rule dominates; low = many fire
+        #                       evenly. 0 when no rule fired.
+        #   _last_cand_concentration : float [batch], 1 - normalized_entropy
+        #                       over summed grounding mass across candidate tails
+        #                       (the 'cand_concentration' signal). High = groundings
+        #                       concentrate on a few tails (discriminative); low =
+        #                       spread across many tails (hub-dilution regime).
+        #   _last_kge_max       : float [batch], max KGE score over filtered
+        #                         candidates per query (the 'kge_max' signal).
+        #                         NOT populated by forward(); must call
+        #                         update_kge_stash(kge_score, flag) after
+        #                         compute_g_KGE(). None until first call.
+        #   _last_kge_entropy   : float [batch], Shannon entropy of softmax over
+        #                         filtered KGE scores (the 'kge_entropy' signal).
+        #                         High = flat KGE distribution (uncertain); low =
+        #                         peaked (confident). NOT populated by forward();
+        #                         computed together with _last_kge_max inside
+        #                         update_kge_stash(). None until first call.
         self._last_ground_mask = None
         self._last_num_rules = None
+        self._last_conf_rules = None
+        self._last_top_rule_conf = None
+        self._last_rule_concentration = None
+        self._last_cand_concentration = None
+        self._last_kge_max = None
+        self._last_kge_entropy = None
 
         self.epsilon = 2.0
 
@@ -404,6 +462,19 @@ class RulE(torch.nn.Module):
         # Per-query count of distinct rules that fired (grounded to >=1 entity).
         rules_fired = torch.zeros(all_h.size(0), device=device)
 
+        # Confidence-mass weighting -- only when per-rule confidence has been
+        # precomputed (eval_compute_rule_confidence). conf_fired accumulates the
+        # confidence of fired rules per query; conf_total is the relation's total
+        # confidence mass (the normalizer, constant across queries of this batch).
+        have_conf = getattr(self, 'rule_confidence', None) is not None
+        conf_fired = torch.zeros(all_h.size(0), device=device) if have_conf else None
+        conf_total = torch.zeros((), device=device) if have_conf else None
+
+        # Per-rule grounding mass [B] per rule, stacked after the loop to [B, R]
+        # for rule_concentration. Top-confidence of any fired rule per query.
+        per_rule_mass = []
+        top_conf = torch.zeros(all_h.size(0), device=device) if have_conf else None
+
         mask = torch.zeros(all_h.size(0), self.graph.entity_size, device=device)
         for index, (r_head, r_body) in self.relation2rules[query_r]:
 
@@ -413,8 +484,19 @@ class RulE(torch.nn.Module):
             
             mask += count
             # This rule "fired" for query b iff it grounded to >=1 candidate tail
-            # for head h_b. Reduce over the entity axis -> [batch] bool -> float.
-            rules_fired += (count.sum(dim=-1) > 0).float()
+            # for head h_b. Reduce over the entity axis -> [batch].
+            mass = count.sum(dim=-1)
+            fired = (mass > 0).float()
+            rules_fired += fired
+            per_rule_mass.append(mass)
+
+            if have_conf:
+                c = self.rule_confidence[index]
+                conf_total = conf_total + c
+                conf_fired = conf_fired + c * fired
+                # Maximum confidence among rules that fired; valid because
+                # rule_confidence > 0 always (sigmoid output).
+                top_conf = torch.maximum(top_conf, c * fired)
 
             rule_index.append(index)
             rule_count.append(count)
@@ -425,12 +507,31 @@ class RulE(torch.nn.Module):
         # single shared beta_density slope stays comparable across relations.
         self._last_num_rules = rules_fired / max(num_rules_total, 1)
 
+        # Confidence-weighted analogue: fraction of the relation's total
+        # rule-confidence mass that fired for each query (in [0, 1]). Upweights
+        # queries where the rules that fired are the ones RulE trusts most.
+        if have_conf:
+            self._last_conf_rules = conf_fired / conf_total.clamp_min(1e-12)
+            self._last_top_rule_conf = top_conf
+        else:
+            self._last_conf_rules = None
+            self._last_top_rule_conf = None
+
+        # Rule-axis concentration: 1 - normalized_entropy over per-rule grounding
+        # mass [B, R]. High = one rule dominates; low = many rules fire evenly.
+        if per_rule_mass:
+            rule_mass_t = torch.stack(per_rule_mass, dim=1)  # [B, R]
+            self._last_rule_concentration = _concentration_from_mass(rule_mass_t, dim=1)
+        else:
+            self._last_rule_concentration = torch.zeros(all_h.size(0), device=device)
+
         if mask.sum().item() == 0:
             # No rule fired for any query in this batch. Stash an all-False
             # grounding mask so any consumer of self._last_ground_mask
             # (compute_adaptive_beta, the per-bucket density analysis) sees
             # density = 0 for every query, which is the correct value here.
             self._last_ground_mask = torch.zeros_like(mask, dtype=torch.bool)
+            self._last_cand_concentration = torch.zeros(all_h.size(0), device=device)
             return mask + self.bias.unsqueeze(0), (1 - mask).bool()
 
         # Snapshot the pre-bias grounding mask before `mask` is overwritten
@@ -438,6 +539,12 @@ class RulE(torch.nn.Module):
         # This is the actual "rule-grounding density" signal -- the post-bias
         # score variance is dominated by self.bias and is not a usable proxy.
         self._last_ground_mask = (mask > 0)
+
+        # Candidate-axis concentration: 1 - normalized_entropy of summed grounding
+        # mass across candidate tails [B, E]. High = groundings concentrate on a
+        # few tails (discriminative); low = spread across many tails (hub-dilution).
+        # Computed here before `mask` is overwritten to bool at the end.
+        self._last_cand_concentration = _concentration_from_mass(mask, dim=1)
 
         candidate_set = torch.nonzero(mask.view(-1), as_tuple=True)[0]
         _mem(f"after candidate_set  C={candidate_set.size(0)}")
@@ -491,19 +598,115 @@ class RulE(torch.nn.Module):
 
         self.rules_weight_emb = torch.cat(rules_weight_emb)
 
+    def eval_compute_rule_confidence(self, device):
+        '''
+        Precompute a per-rule scalar "confidence" in (0, 1), used to weight the
+        distinct-rule-count feature (conf_rules). The confidence is RulE's own
+        rule-plausibility score from add_ruleE -- gamma_rule - ||body - head||,
+        higher = the rule embedding satisfies the relation algebra better --
+        squashed through a sigmoid so it is a bounded, positive weight.
+
+        Stored as self.rule_confidence, aligned with the rule index used in
+        forward() (rule_features[i] <-> rule id i <-> rules_weight_emb[i]). Call
+        once after load (mirrors eval_compute_rule_weight); forward() only emits
+        self._last_conf_rules when this has run.
+        '''
+        batch = 128
+        self.rule_masks = self.rule_masks.to(device)
+        self.rule_features = self.rule_features.to(device)
+        split_num = max(self.rule_features.size(0) // batch, 1)
+        rule_batches = torch.split(self.rule_features, split_num, 0)
+        rule_mask_batches = torch.split(self.rule_masks, split_num, 0)
+        plausibility = list()
+
+        with torch.no_grad():
+            for rules, rules_mask in zip(rule_batches, rule_mask_batches):
+                dist, _ = self.add_ruleE(rules.unsqueeze(1), rules_mask)
+                plausibility.append(dist.squeeze(1))
+
+        self.rule_plausibility = torch.cat(plausibility)          # [num_rules]
+        self.rule_confidence = torch.sigmoid(self.rule_plausibility)  # (0, 1)
+
+    def update_kge_stash(self, kge_score, flag):
+        """Stash per-query KGE summary statistics for use by get_query_feature().
+
+        Call after compute_g_KGE() and before compute_adaptive_beta(). Safe to
+        call unconditionally: always populates _last_kge_max and _last_kge_entropy
+        regardless of feature_name so callers need not branch.
+
+        Args:
+            kge_score: [batch, num_entities] float tensor of KGE scores.
+            flag:      [batch, num_entities] bool, True for filtered candidates
+                       (entities not known to be positive for this query).
+        """
+        # Fill non-candidates with -inf so they are ignored by max() and softmax().
+        masked = kge_score.masked_fill(~flag, float('-inf'))
+        self._last_kge_max = masked.max(dim=-1).values  # [batch]
+
+        # Shannon entropy of softmax over filtered candidates.
+        # softmax(-inf) = 0, so non-candidates contribute nothing and the
+        # shift-invariance of softmax means the raw RotatE scale is irrelevant.
+        # For queries with no filtered candidates (flag all-False) softmax is
+        # undefined; set entropy to 0 for those queries.
+        p = torch.softmax(masked, dim=-1)
+        ent = -(p * torch.log(p.clamp_min(1e-12))).sum(dim=-1)
+        self._last_kge_entropy = torch.where(
+            flag.any(dim=-1), ent, torch.zeros_like(ent)
+        )
+
     def get_query_feature(self):
         """Raw per-query feature [batch] selected by self.feature_name.
 
-        'density'   : fraction of candidate entities with >=1 rule fired
-                      (read from _last_ground_mask). The post-bias rule score is
-                      NOT a usable proxy here -- its variance is dominated by
-                      self.bias, which collapsed density to ~1 for every query.
-        'num_rules' : fraction of this relation's rules that fired for the
-                      (h, r) query (read from _last_num_rules) -- a breadth-of-
-                      evidence signal independent of how many tails each rule hit.
+        'density'           : fraction of candidate entities with >=1 rule fired
+                              (read from _last_ground_mask). The post-bias rule
+                              score is NOT a usable proxy -- its variance is
+                              dominated by self.bias.
+        'num_rules'         : fraction of this relation's rules that fired for
+                              the (h, r) query (read from _last_num_rules) -- a
+                              breadth-of-evidence signal.
+        'kge_max'           : max KGE score over filtered candidates (read from
+                              _last_kge_max). Populated by update_kge_stash()
+                              after compute_g_KGE(). Needs --standardize_feature
+                              because the raw value is dataset/relation-scale-
+                              dependent.
+        'kge_entropy'       : Shannon entropy of softmax over filtered KGE scores
+                              (read from _last_kge_entropy). High = flat/uncertain
+                              KGE distribution; low = peaked/confident. Populated
+                              by update_kge_stash(); needs --standardize_feature.
+        'top_rule_confidence': max RulE plausibility (sigmoid of rule embedding
+                              distance) among rules that fired for this query; 0
+                              if no rule fired (read from _last_top_rule_conf).
+                              Requires eval_compute_rule_confidence() to have run
+                              before the eval loop.
 
-        forward() must have populated the relevant stash first.
+        forward() must have been called first. For kge_max / kge_entropy,
+        update_kge_stash() must also have been called after compute_g_KGE().
+        For top_rule_confidence, eval_compute_rule_confidence() must have run.
         """
+        if self.feature_name == 'kge_max':
+            if self._last_kge_max is None:
+                raise RuntimeError(
+                    "get_query_feature('kge_max') requires update_kge_stash() "
+                    "to have been called after compute_g_KGE(); "
+                    "self._last_kge_max is None."
+                )
+            return self._last_kge_max
+        if self.feature_name == 'kge_entropy':
+            if self._last_kge_entropy is None:
+                raise RuntimeError(
+                    "get_query_feature('kge_entropy') requires update_kge_stash() "
+                    "to have been called after compute_g_KGE(); "
+                    "self._last_kge_entropy is None."
+                )
+            return self._last_kge_entropy
+        if self.feature_name == 'top_rule_confidence':
+            if self._last_top_rule_conf is None:
+                raise RuntimeError(
+                    "get_query_feature('top_rule_confidence') requires "
+                    "eval_compute_rule_confidence() to have run before the eval "
+                    "loop; self._last_top_rule_conf is None."
+                )
+            return self._last_top_rule_conf
         if self.feature_name == 'num_rules':
             if self._last_num_rules is None:
                 raise RuntimeError(

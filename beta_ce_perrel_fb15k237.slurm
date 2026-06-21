@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH --job-name=beta_ce_perrel_fb15k237_kgemax
+#SBATCH --job-name=beta_ce_perrel_fb15k237_topruleconf
 #SBATCH --partition=mcs.gpu.q
 #SBATCH --constraint=v100
 #SBATCH --time=28:00:00
@@ -7,46 +7,40 @@
 #SBATCH --cpus-per-task=10
 #SBATCH --mem=32G
 #SBATCH --gpus=1
-#SBATCH --output=%x_%j.out
-#SBATCH --error=%x_%j.err
+#SBATCH --array=0-2
+#SBATCH --output=%x_%A_%a.out
+#SBATCH --error=%x_%A_%a.err
 #SBATCH --mail-type=BEGIN,END,FAIL
 #SBATCH --mail-user=e.yerbolatova@student.tue.nl
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Adaptive kge_max mixing-weight (beta) training — FB15k-237, FIXED-0.5 intercept.
+# Adaptive top_rule_confidence mixing-weight (beta) training — FB15k-237,
+# multi-seed.
 #
-# Experiment (ii): does a per-query kge_max slope help on top of a NEUTRAL 0.5
-# baseline?  The per-relation intercept on FB15k already collapsed to ~0.5
-# (mean 0.504, std 0.019; Rel-Beta MRR 0.3639 vs Fixed-alpha 0.3584), so we do
-# NOT train it here:
-#   --freeze_intercept : stage [3] is skipped; beta[r] stays at init
-#                        (logit 0 => sigmoid 0.5). Only the adaptive beta_density
-#                        slope is trained (stage [6]):
-#                            beta(h,r) = sigmoid(0 + beta_density * z(kge_max)).
-#   --feature kge_max  : per-query max KGE over filtered candidates. Raw RotatE
-#                        scale, so --standardize_feature z-scores it on the
-#                        beta-train split (beta_density is then a unit-variance
-#                        slope, comparable across datasets).
-#   --normalize_scores : rule/KGE put on a common per-query scale before mixing.
+# Feature: top_rule_confidence — max RulE plausibility (sigmoid of rule
+# embedding distance) among rules that fired for a query; 0 if none fired.
+# High confidence = the best-matching rule has a strong embedding alignment.
+# Requires eval_compute_rule_confidence() in the trainer (automatically called
+# after eval_compute_rule_weight via the hasattr guard).
 #
-# Ablation axis: under --freeze_intercept, --beta_l2 is a NO-OP (it only shrinks
-# the *trained* intercept, which we no longer train), so an L2 grid would be
-# redundant — both L2 levels produce byte-identical runs. The single remaining
-# axis that affects the kge_max slope is label_smoothing, hence 2 variants.
-# beta_density is one scalar fit with early stopping, so it needs no L2 of its own.
+# Multi-seed job array (--array=0-2) runs seeds 42, 43, 44 in parallel,
+# each in its own output directory. Fixed config (ls=0.2) matched to
+# FB15k-237's grounding-stage smoothing.
 #
-#   FIXED_ALPHA = 3.0  : FB15k's published operating point — the [1] baseline.
-#   BETA_EPOCHS = 6     : enough for the single beta_density scalar to converge.
+# Key settings:
+#   --feature top_rule_confidence : per-query adaptive feature.
+#   --standardize_feature         : z-scores on the beta-train split.
+#   --loss ce                     : filtered softmax cross-entropy.
+#   --density_lr 0.01             : LR for the single beta_density scalar.
+#   FIXED_ALPHA=3.0               : FB15k-237's published operating point.
 #
-#   Ablation (2 variants):
-#     freeze_kgemax_ls0.2 -- label smoothing matched to the grounding objective
-#     freeze_kgemax_ls0   -- hard-target control
-#
-#   Fixed across all variants:
-#     --loss ce, --freeze_intercept, --feature kge_max, --normalize_scores,
-#     --standardize_feature
+# Both stages run: [3] trains per-relation intercept beta[r], then [6] trains
+# the adaptive beta_density slope on top_rule_confidence.
 # ─────────────────────────────────────────────────────────────────────────────
+
+SEEDS=(42 43 44)
+SEED="${SEEDS[$SLURM_ARRAY_TASK_ID]}"
 
 # ── GPU info ───────────────────────────────────────────────────────────────────
 echo "=== GPU info ==="
@@ -74,36 +68,30 @@ echo "PyTorch : $(python3 -c 'import torch; print(torch.__version__, "| CUDA:", 
 echo ""
 
 # ── Configuration ──────────────────────────────────────────────────────────────
-# Reuse the grounding checkpoint from the original FB15k-237 run — the same
-# rule + KGE heads used by feature_validity_fb15k.slurm.
 ORIG_OUTPUT="$HOME/RulE/outputs/fb15k237_original"
-GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
-
-# The pretrain checkpoint is used only for the guard below — the beta training
-# script loads the grounding checkpoint directly.
 PRETRAIN_CHECKPOINT="${ORIG_OUTPUT}/checkpoint"
+GROUNDING_CHECKPOINT="${ORIG_OUTPUT}/grounding.pt"
 
 CONFIG="$HOME/RulE/config/fb15k237_hpc.json"
 
-SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_fb15k237_kgemax_nonorm_perrel"
+SAVE_PATH="$HOME/RulE/outputs/beta_ce_perrel_fb15k237_topruleconf/seed${SEED}"
 GPU_LOG="${SAVE_PATH}/gpu_memory.log"
 
-# Beta hyper-parameters
-BETA_EPOCHS=6      # plateau is typically reached by ep 6-7; saves ~30% wall-time
+BETA_EPOCHS=6      # plateau typically reached by ep 6-7 on FB15k-237
 BETA_LR=0.001
 DENSITY_LR=0.01
-FIXED_ALPHA=3.0    # FB15k's published operating point (config: alpha=3.0)
-SEED=42
-
+FIXED_ALPHA=3.0    # FB15k-237's published operating point (config: alpha=3.0)
 ABLATION_ROOT="${SAVE_PATH}"
 
+echo "Array task / seed      : ${SLURM_ARRAY_TASK_ID} / ${SEED}"
 echo "Pre-train checkpoint   : ${PRETRAIN_CHECKPOINT}"
 echo "Grounding checkpoint   : ${GROUNDING_CHECKPOINT}"
 echo "Config                 : ${CONFIG}"
 echo "Save path              : ${SAVE_PATH}"
-echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR}"
+echo "Feature                : top_rule_confidence (standardized, per-query adaptive)"
+echo "Beta epochs / lr       : ${BETA_EPOCHS} / ${BETA_LR} (intercept), ${DENSITY_LR} (density)"
 echo "Fixed alpha (baseline) : ${FIXED_ALPHA}"
-echo "Loss                   : cross-entropy (per-relation intercept + adaptive kge_max)"
+echo "Loss                   : cross-entropy"
 echo "Started                : $(date '+%Y-%m-%d %H:%M:%S')"
 echo ""
 
@@ -130,7 +118,7 @@ GPU_MON_PID=$!
 echo "GPU memory monitor PID : ${GPU_MON_PID}  (log: ${GPU_LOG})"
 echo ""
 
-# ── Shared arguments for every variant ────────────────────────────────────────
+# ── Shared arguments ───────────────────────────────────────────────────────────
 COMMON_ARGS=(
     --config             "${CONFIG}"
     --checkpoint         "${GROUNDING_CHECKPOINT}"
@@ -140,8 +128,8 @@ COMMON_ARGS=(
     --alpha              "${FIXED_ALPHA}"
     --seed               "${SEED}"
     --loss               ce
+    --feature            top_rule_confidence
     --standardize_feature
-    --feature            kge_max
 )
 
 # ── run_variant <name> [extra args…] ──────────────────────────────────────────
@@ -182,14 +170,9 @@ run_variant() {
 cd "$HOME/RulE/RulE_original/src"
 TRAIN_START=$(date +%s)
 
-# label smoothing matched to FB15k's grounding objective (config smoothing=0.2).
-run_variant "freeze_kgemax_ls0.2" \
+# Fixed config: label smoothing matched to FB15k-237's grounding objective (0.2).
+run_variant "toprule_ls0.2" \
     --label_smoothing 0.2
-
-# hard-target control: isolates the label-smoothing effect on the kge_max slope.
-# (No L2 axis: --beta_l2 only shrinks the trained intercept, which is frozen here.)
-# run_variant "freeze_kgemax_ls0" \
-#     --label_smoothing 0.0
 
 TRAIN_END=$(date +%s)
 TRAIN_WALL=$(( TRAIN_END - TRAIN_START ))
@@ -201,7 +184,7 @@ wait "${GPU_MON_PID}" 2>/dev/null
 # ── Timing summary ─────────────────────────────────────────────────────────────
 echo ""
 echo "=================================================="
-echo "  All variants complete"
+echo "  All variants complete  (seed=${SEED})"
 echo "=================================================="
 printf "  Total wall time : %dh%02dm%02ds\n" \
     $(( TRAIN_WALL / 3600 )) $(( (TRAIN_WALL % 3600) / 60 )) $(( TRAIN_WALL % 60 ))

@@ -28,14 +28,21 @@ def parse_args():
                        help='Fixed alpha for comparison baseline')
     # Adaptive-beta feature + score scaling -----------------------------------
     parser.add_argument('--feature', type=str, default='density',
-                       choices=['density', 'num_rules', 'kge_max'],
+                       choices=['density', 'num_rules', 'kge_max',
+                                'kge_entropy', 'top_rule_confidence'],
                        help="Per-query feature the adaptive head conditions on. "
                             "'density': fraction of candidate entities with >=1 "
                             "rule fired. 'num_rules': fraction of the relation's "
                             "rules that fired for the (h, r) query. "
                             "'kge_max': max KGE score over filtered candidates "
-                            "(requires --standardize_feature; the raw value is "
-                            "dataset/relation-scale-dependent).")
+                            "(requires --standardize_feature; raw value is "
+                            "dataset/relation-scale-dependent). "
+                            "'kge_entropy': Shannon entropy of softmax over "
+                            "filtered KGE scores (high = uncertain KGE; requires "
+                            "--standardize_feature). "
+                            "'top_rule_confidence': max RulE plausibility among "
+                            "rules that fired for this query; 0 if none fired "
+                            "(requires eval_compute_rule_confidence to have run).")
     parser.add_argument('--normalize_scores', action='store_true',
                        help='Per-query (over entities) divide rule_logits and '
                             'kge_score by their std before mixing, so the convex '
@@ -425,10 +432,12 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
         # row i to compute_adaptive_beta (which reads them internally). Without
         # this slicing, compute_adaptive_beta would use the WHOLE batch's
         # feature and the [0] indexing below would reuse the first query's
-        # feature for every sample i -> wrong per-query density/num_rules.
+        # feature for every sample i -> wrong per-query feature value.
         saved_ground_mask = model._last_ground_mask
         saved_num_rules = model._last_num_rules
         saved_kge_max = model._last_kge_max
+        saved_kge_entropy = model._last_kge_entropy
+        saved_top_rule_conf = model._last_top_rule_conf
 
         for i in valid_indices:
             r_i = all_r[i:i+1]
@@ -446,10 +455,18 @@ def train_beta_epoch(model, dataloader, optimizer, device, adaptive=False,
                 model._last_kge_max = (
                     saved_kge_max[i:i+1] if saved_kge_max is not None else None
                 )
+                model._last_kge_entropy = (
+                    saved_kge_entropy[i:i+1] if saved_kge_entropy is not None else None
+                )
+                model._last_top_rule_conf = (
+                    saved_top_rule_conf[i:i+1] if saved_top_rule_conf is not None else None
+                )
                 beta_i, _ = model.compute_adaptive_beta(rl_i, r_i)
                 model._last_ground_mask = saved_ground_mask
                 model._last_num_rules = saved_num_rules
                 model._last_kge_max = saved_kge_max
+                model._last_kge_entropy = saved_kge_entropy
+                model._last_top_rule_conf = saved_top_rule_conf
             elif model.use_per_relation:
                 beta_i = torch.sigmoid(model.beta[r_i[0]]).unsqueeze(-1)
             else:
@@ -564,7 +581,7 @@ def compute_feature_stats(model, dataloader, device):
             all_r = all_r.squeeze(0).to(device)
             flag = flag.squeeze(0).to(device)
             model(all_h, all_r, None)
-            if model.feature_name == 'kge_max':
+            if model.feature_name in ('kge_max', 'kge_entropy'):
                 kge_score = model.compute_g_KGE(all_h, all_r)
                 model.update_kge_stash(kge_score, flag)
             feats.append(model.get_query_feature().detach().cpu())
@@ -1069,7 +1086,11 @@ def main():
     print("Unexpected keys (in checkpoint, not in model):", result.unexpected_keys)
     model = model.to(device)
     model.eval_compute_rule_weight(device)
-    
+    # Precompute per-rule plausibility (sigmoid distance) so forward() fills
+    # _last_top_rule_conf. Harmless for features that don't use it.
+    if hasattr(model, 'eval_compute_rule_confidence'):
+        model.eval_compute_rule_confidence(device)
+
     # Create dataloaders.
     # Use batch_size=1 regardless of config's g_batch_size: compute_g_KGE
     # materializes a [batch, num_entities, hidden_dim*2] tail tensor on the GPU.
