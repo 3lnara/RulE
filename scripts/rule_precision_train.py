@@ -160,6 +160,8 @@ def compute_precision(
     graph: MinimalGraph,
     rules: list,
     gold: dict,
+    device: torch.device = None,
+    chunk_size: int = None,
 ) -> tuple:
     """Return (fired_total, gold_fired) int64 numpy arrays indexed by rule_id.
 
@@ -168,7 +170,18 @@ def compute_precision(
                                  t in gold[r][h]}
 
     Rules for which no known subject exists get both counts = 0.
+
+    device     : torch device for grounding (CPU or CUDA). Grounding tensors
+                 (H_t, gold_mask) and MinimalGraph adjacency follow this device.
+    chunk_size : process the known-subject heads of each relation in blocks of
+                 this many at a time. gold_mask is [B, N] per relation, so for
+                 large datasets (e.g. WN18RR, N ~= 40943, many known heads) the
+                 full [B, N] mask can be large; chunking bounds peak memory.
+                 None / <=0 means no chunking (single block per relation), which
+                 reproduces the original behavior for UMLS / Family.
     """
+    if device is None:
+        device = torch.device("cpu")
     R = len(rules)
     fired_total = np.zeros(R, dtype=np.int64)
     gold_fired  = np.zeros(R, dtype=np.int64)
@@ -189,23 +202,27 @@ def compute_precision(
         known_h = sorted(gold[r].keys())
         if not known_h:
             continue
+        B = len(known_h)
+        step = B if (chunk_size is None or chunk_size <= 0) else chunk_size
 
-        H_t = torch.tensor(known_h, dtype=torch.long)
-        B   = len(known_h)
+        for blk in range(0, B, step):
+            block_h = known_h[blk:blk + step]
+            Bk = len(block_h)
+            H_t = torch.tensor(block_h, dtype=torch.long, device=device)
 
-        # gold_mask[i, j] = True iff j in gold[r][known_h[i]]
-        gold_mask = torch.zeros(B, N, dtype=torch.bool)
-        for i, h in enumerate(known_h):
-            for t in gold[r][h]:
-                gold_mask[i, t] = True
+            # gold_mask[i, j] = True iff j in gold[r][block_h[i]]
+            gold_mask = torch.zeros(Bk, N, dtype=torch.bool, device=device)
+            for i, h in enumerate(block_h):
+                for t in gold[r][h]:
+                    gold_mask[i, t] = True
 
-        for gid, r_head, body in rule_list:
-            with torch.no_grad():
-                counts = graph.grounding(H_t, r_head, body, None)  # [B, N] int
-                fired  = counts > 0                                  # [B, N] bool
+            for gid, r_head, body in rule_list:
+                with torch.no_grad():
+                    counts = graph.grounding(H_t, r_head, body, None)  # [Bk, N]
+                    fired  = counts > 0                                  # [Bk, N]
 
-            fired_total[gid] += int(fired.sum().item())
-            gold_fired[gid]  += int((fired & gold_mask).sum().item())
+                fired_total[gid] += int(fired.sum().item())
+                gold_fired[gid]  += int((fired & gold_mask).sum().item())
 
     elapsed = time.time() - t0
     print(f"  Grounding done in {elapsed:.1f}s  "
@@ -289,6 +306,15 @@ def parse_args():
                    help="Skip writing precision_vs_confidence.png.")
     p.add_argument("--per_relation", action="store_true",
                    help="Print an additional per-relation correlation table.")
+    p.add_argument("--device",       default="cpu", choices=["cpu", "cuda"],
+                   help="Device for grounding. 'cuda' scales the precision "
+                        "computation to larger datasets (WN18RR/FB15k). "
+                        "Falls back to cpu if CUDA is unavailable.")
+    p.add_argument("--chunk_size",   type=int, default=0,
+                   help="Process each relation's known-subject heads in blocks "
+                        "of this size to bound the [B, N] gold_mask memory "
+                        "(useful for WN18RR/FB15k). 0 = no chunking (default; "
+                        "matches the original behavior for UMLS/Family).")
     return p.parse_args()
 
 
@@ -300,10 +326,18 @@ def main():
     rule_file = args.rule_file or os.path.join(args.data_path, "mined_rules.txt")
     dataset   = os.path.basename(os.path.normpath(args.data_path))
 
+    if args.device == "cuda" and not torch.cuda.is_available():
+        print("  WARNING: --device cuda requested but CUDA is unavailable; "
+              "falling back to cpu.")
+        device = torch.device("cpu")
+    else:
+        device = torch.device(args.device)
+
     print(f"dataset   : {dataset}")
     print(f"data_path : {args.data_path}")
     print(f"rule_file : {rule_file}")
     print(f"out_dir   : {args.out_dir}")
+    print(f"device    : {device}  chunk_size: {args.chunk_size or 'none'}")
     print(f"scipy     : {'available (exact p-values)' if _scipy_stats else 'not found (Fisher-z approx)'}")
 
     # ---- Graph + rules -------------------------------------------------------
@@ -321,42 +355,57 @@ def main():
     # Build quick lookup: gid -> body (for CSV output)
     id_to_body = {rule[0]: rule[2:] for rule in rules}
 
-    # ---- Confidence: read rule_meta.pt (primary) or fall back to checkpoint --
+    # ---- Rule metadata: head + body length are always derivable from the rule
+    # file (gid == line index in load_rules), so the precision computation runs
+    # fully from scratch -- no rule_meta.pt or checkpoint required.
+    lengths_meta = np.array([len(r[2:]) for r in rules], dtype=np.int64)
+    heads_meta   = np.array([r[1]       for r in rules], dtype=np.int64)
+
+    # ---- Confidence (w_R) is OPTIONAL: it is only used for the
+    # precision-vs-confidence correlation report + scatter and saved alongside
+    # precision for reference. The additive precision*binary scorer reads only
+    # `precision` from rule_precision.pt, so confidence is not needed to produce
+    # usable weights. Resolution order: rule_meta.pt (if present) -> checkpoint
+    # (+ config) -> none (skip correlation).
+    w_R = None
     meta_path = os.path.join(args.out_dir, "rule_meta.pt")
     if os.path.exists(meta_path):
         print(f"\nLoading confidence from existing {meta_path} ...")
         meta = torch.load(meta_path, weights_only=False)
-        w_R          = meta["w_R_unclamped"].float().numpy()
-        lengths_meta = meta["length"].long().numpy()
-        heads_meta   = meta["head"].long().numpy()
+        w_R = meta["w_R_unclamped"].float().numpy()
         if len(w_R) != R:
             raise ValueError(
                 f"rule_meta.pt has {len(w_R)} entries but rule_file has {R} rules. "
                 "Ensure both come from the same training run.")
     elif args.checkpoint and args.config:
-        print(f"\nrule_meta.pt absent; falling back to checkpoint {args.checkpoint} ...")
+        print(f"\nrule_meta.pt absent; computing confidence from checkpoint "
+              f"{args.checkpoint} ...")
         import json
         with open(args.config) as f:
             cfg = json.load(f)
-        device = torch.device("cpu")
-        model = _drc.build_model(cfg, graph, rules, device)
-        ckpt  = torch.load(args.checkpoint, map_location=device)
+        cdev = torch.device("cpu")
+        model = _drc.build_model(cfg, graph, rules, cdev)
+        ckpt  = torch.load(args.checkpoint, map_location=cdev)
         state = ckpt["model"] if "model" in ckpt else ckpt
         model.load_state_dict(state, strict=False)
         model.eval()
-        w_R          = _drc.compute_unclamped_weights(model, device).numpy()
-        lengths_meta = np.array([len(r[2:]) for r in rules], dtype=np.int64)
-        heads_meta   = np.array([r[1]       for r in rules], dtype=np.int64)
+        w_R = _drc.compute_unclamped_weights(model, cdev).numpy()
         if len(w_R) != R:
             raise ValueError(f"Checkpoint yielded {len(w_R)} weights but {R} rules loaded.")
     else:
-        raise FileNotFoundError(
-            f"rule_meta.pt not found at {meta_path} and no --checkpoint provided. "
-            "Run dump_rule_counts.py first, or pass --checkpoint + --config.")
+        print("\nNo rule_meta.pt or --checkpoint provided; computing precision "
+              "from scratch WITHOUT confidence (precision-vs-confidence "
+              "correlation + scatter will be skipped).")
 
-    n_neg = int((w_R < 0).sum())
-    print(f"  confidence  range=[{w_R.min():.3f}, {w_R.max():.3f}]  "
-          f"mean={w_R.mean():.3f}  negative={n_neg}/{R}")
+    has_confidence = w_R is not None
+    if not has_confidence:
+        # NaN placeholder so downstream save/CSV stay uniform; the additive
+        # scorer ignores this field.
+        w_R = np.full(R, np.nan, dtype=np.float64)
+    else:
+        n_neg = int((w_R < 0).sum())
+        print(f"  confidence  range=[{w_R.min():.3f}, {w_R.max():.3f}]  "
+              f"mean={w_R.mean():.3f}  negative={n_neg}/{R}")
 
     # ---- Gold dict: gold[r][h] = set of true train tails for (h, r) ----------
     print("\nBuilding gold dict from train facts...")
@@ -366,7 +415,8 @@ def main():
 
     # ---- PCA precision computation -------------------------------------------
     print("\nComputing PCA precision (grounding from known-subject heads)...")
-    fired_total, gold_fired = compute_precision(graph, rules, gold)
+    fired_total, gold_fired = compute_precision(
+        graph, rules, gold, device=device, chunk_size=args.chunk_size)
 
     support   = fired_total
     precision = np.where(support > 0,
@@ -390,7 +440,10 @@ def main():
     # ---- Correlation analysis ------------------------------------------------
     # Restrict to rules with support >= min_support and finite precision.
     mask_all = has_prec & (support >= args.min_support)
-    if mask_all.sum() < 4:
+    if not has_confidence:
+        print("\nSkipping precision-vs-confidence correlation "
+              "(no confidence available).")
+    elif mask_all.sum() < 4:
         print("\nWARNING: fewer than 4 rules pass the support filter; "
               "correlation not computed.")
     else:
@@ -498,9 +551,11 @@ def main():
     print(f"Saved {out_csv}  ({R} rows)")
 
     # ---- Scatter plot --------------------------------------------------------
-    if not args.no_plot:
+    if not args.no_plot and has_confidence:
         out_png = os.path.join(args.out_dir, "precision_vs_confidence.png")
         make_scatter(precision, w_R, lengths_meta, support, out_png, args.min_support)
+    elif not args.no_plot:
+        print("Skipping precision_vs_confidence.png (no confidence available).")
 
     print("\nDone.")
 

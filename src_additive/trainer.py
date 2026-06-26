@@ -402,7 +402,48 @@ class GroundTrainer(object):
         # w_R is warm-started from the raw RulE confidence (gamma_rule - d, Eq. 6)
         # and stored as a frozen buffer -- NO sigmoid -- so the additive score
         # matches the paper's "sum (w/o MLP)" baseline exactly.
-        if getattr(args, 'simple_aggregation', False):
+        if getattr(args, 'precision_binary', False):
+            # === Precision x binary aggregation ===
+            # Per-rule weight = empirical train PCA precision (from
+            # rule_precision.pt) instead of the frozen RulE confidence. Binary
+            # activation (paper_sum) and no bias, so the score is
+            # sum_R precision_R * 1[rule R fired on t]. Precision is in [0, 1],
+            # so no clamping is needed. This mirrors the offline scorer
+            # score_counts_offline.py --weight_source precision.
+            precision_file = getattr(args, 'precision_file', None)
+            if precision_file is None:
+                raise ValueError(
+                    '--precision_binary requires --precision_file pointing at a '
+                    'rule_precision.pt (written by scripts/rule_precision_train.py).')
+            logging.info('[precision_binary] loading precision weights from %s'
+                         % precision_file)
+            prec_data = torch.load(precision_file, map_location=self.device,
+                                   weights_only=False)
+            precision = prec_data['precision'].float()
+            R = self.model.rule_features.size(0)
+            if precision.size(0) != R:
+                raise ValueError(
+                    'rule_precision.pt has %d entries but the model has %d rules. '
+                    'Ensure both come from the same dataset/rule_file.'
+                    % (precision.size(0), R))
+            # Align precision to model rule rows via the global rule id stored in
+            # rule_features[:, 0]; NaN (rules that never fired from a known
+            # subject) -> 0.0 so they contribute nothing, matching the offline
+            # scorer.
+            gids = self.model.rule_features[:, 0].long().to(precision.device)
+            w = torch.nan_to_num(precision[gids], nan=0.0)
+            n_nan = int(torch.isnan(precision[gids]).sum().item())
+            n_pos = int((w > 0).sum().item())
+            self.model.register_buffer('rule_weight_logit',
+                                       w.to(self.device).clone())
+            self.model.simple_aggregation = True
+            self.model.paper_sum = True          # binary activation
+            self.model.use_bias = False          # purely rule-based
+            self.model.bias.requires_grad_(False)
+            logging.info('[precision_binary] ENABLED: binary activation, no bias, '
+                         'per-rule precision weights '
+                         '(rules>0: %d/%d, nan->0: %d).' % (n_pos, R, n_nan))
+        elif getattr(args, 'simple_aggregation', False):
             rule_features = self.model.rule_features.to(self.device)
             rule_masks = self.model.rule_masks.to(self.device)
             batch = 128
@@ -639,7 +680,11 @@ class GroundTrainer(object):
         query2LH = dict()
         for h, r, t, L, H in ranks.data.cpu().numpy().tolist():
             query2LH[(h, r, t)] = (L, H)
-            
+
+        # Per-query rank dump (h, r, t, L, H) for offline rank-win comparison.
+        if getattr(self.args, 'dump_ranks', False):
+            self._dump_ranks(split, query2LH)
+
         hit1, hit3, hit10, mr, mrr = 0.0, 0.0, 0.0, 0.0, 0.0
         for (L, H) in query2LH.values():
             if expectation:
@@ -679,6 +724,23 @@ class GroundTrainer(object):
     
         
         return mrr
+
+
+    def _dump_ranks(self, split, query2LH):
+        """Write per-query filtered ranks to ranks_<split>.csv in save_path.
+
+        Columns: h, r, t, L, H. Rank = (L + H - 1) / 2 is the standard
+        mid-point for tie bands; downstream comparison recomputes it.
+        """
+        import csv
+        out_path = os.path.join(self.args.save_path, 'ranks_%s.csv' % split)
+        with open(out_path, 'w', newline='') as fh:
+            writer = csv.writer(fh)
+            writer.writerow(['h', 'r', 't', 'L', 'H'])
+            for (h, r, t), (L, H) in query2LH.items():
+                writer.writerow([h, r, t, L, H])
+        logging.info('[dump_ranks] wrote %s (%d queries)'
+                     % (out_path, len(query2LH)))
 
 
     @torch.no_grad()

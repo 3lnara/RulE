@@ -130,6 +130,8 @@ run_rsync "${DEST_BASE}/scripts/" \
   "${SCRIPT_DIR}/scripts/summarize_unified_results.py" \
   "${SCRIPT_DIR}/scripts/submit_all.sh" \
   "${SCRIPT_DIR}/scripts/reorganize_hpc_layout.sh" \
+  "${SCRIPT_DIR}/scripts/rule_precision_train.py" \
+  "${SCRIPT_DIR}/scripts/dump_rule_counts.py" \
   || OVERALL_EXIT=$?
 
 # 1b. RulE_original/src/ → remote RulE_original/src/
@@ -188,6 +190,8 @@ run_rsync "${HPC_USER}@${HPC_HOST}:~/" \
   "${SCRIPT_DIR}/additive_wn18rr_multiseed.slurm" \
   "${SCRIPT_DIR}/additive_wn18rr_paper_sum_clamp.slurm" \
   "${SCRIPT_DIR}/additive_umls_paper_sum_clamp.slurm" \
+  "${SCRIPT_DIR}/additive_precision_binary_umls.slurm" \
+  "${SCRIPT_DIR}/additive_precision_binary_family.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr.slurm" \
   "${SCRIPT_DIR}/adaptive_beta_only_wn18rr_numnorm_rel.slurm" \

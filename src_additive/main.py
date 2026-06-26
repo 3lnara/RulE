@@ -113,6 +113,21 @@ def parse_args(args=None):
                              'negative-confidence rules. Only affects '
                              '--simple_aggregation / --paper_sum runs.')
 
+    # === Precision x binary aggregation ===
+    parser.add_argument('--precision_binary', action='store_true', default=False,
+                        help='Weight rules by their empirical train PCA precision '
+                             '(from rule_precision.pt) instead of the frozen RulE '
+                             'confidence, with binary activation (1 if rule fired) and '
+                             'no per-entity bias. Implies --simple_aggregation. Use '
+                             '--precision_file to point at the rule_precision.pt to load.')
+    parser.add_argument('--precision_file', type=str, default=None,
+                        help='Path to rule_precision.pt (written by '
+                             'scripts/rule_precision_train.py). Required with '
+                             '--precision_binary.')
+    parser.add_argument('--dump_ranks', action='store_true', default=False,
+                        help='Write per-query filtered ranks (h, r, t, L, H) to '
+                             'ranks_<split>.csv in --save_path during evaluation.')
+
     return parser.parse_args(args)
 
 def main():
@@ -125,6 +140,9 @@ def main():
     cli_paper_sum = args.paper_sum
     cli_no_bias = args.no_bias
     cli_clamp_negative_confidence = args.clamp_negative_confidence
+    cli_precision_binary = args.precision_binary
+    cli_precision_file = args.precision_file
+    cli_dump_ranks = args.dump_ranks
     cli_num_iters = args.num_iters  # None-sentinel below: argparse default is 20
     # Sentinel: argparse default is -1 meaning "not provided, use config value".
     cli_seed = args.seed if args.seed != -1 else None
@@ -141,8 +159,11 @@ def main():
     args.paper_sum = cli_paper_sum
     args.no_bias = cli_no_bias
     args.clamp_negative_confidence = cli_clamp_negative_confidence
-    # --paper_sum and --no_bias both force simple_aggregation
-    if cli_paper_sum or cli_no_bias:
+    args.precision_binary = cli_precision_binary
+    args.precision_file = cli_precision_file
+    args.dump_ranks = cli_dump_ranks
+    # --paper_sum, --no_bias and --precision_binary all force simple_aggregation
+    if cli_paper_sum or cli_no_bias or cli_precision_binary:
         args.simple_aggregation = True
     else:
         args.simple_aggregation = cli_simple_aggregation

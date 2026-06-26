@@ -143,14 +143,20 @@ class MinimalGraph:
         Returns updated [N, B].
 
         Replaces data.KnowledgeGraph.propagate (which uses torch_scatter)
-        with torch.scatter_add_ (standard PyTorch).
+        with torch.scatter_add_ (standard PyTorch). Device-aware: the adjacency
+        tensors follow x's device so this runs unchanged on CPU or CUDA.
         """
         src, dst = self.relation2adjacency[relation]
         if src.numel() == 0:
             return torch.zeros_like(x)
+        # Keep the adjacency on the same device as the state tensor x.
+        if src.device != x.device:
+            src = src.to(x.device)
+            dst = dst.to(x.device)
+            self.relation2adjacency[relation] = (src, dst)
         N, B = x.size()
         messages = x[src]                            # [E, B]
-        new_x    = torch.zeros(N, B, dtype=x.dtype)
+        new_x    = torch.zeros(N, B, dtype=x.dtype, device=x.device)
         new_x.scatter_add_(0, dst.unsqueeze(1).expand_as(messages), messages)
         return new_x
 
@@ -158,13 +164,13 @@ class MinimalGraph:
                   r_body: list, edges_to_remove=None) -> torch.Tensor:
         """Ground a single rule body from all heads in h.
 
-        h: [B] head entity indices
+        h: [B] head entity indices (device determines where grounding runs).
         Returns [B, N] integer count tensor (paths from each h to each entity).
         edges_to_remove: ignored (always None in eval / dump context).
         """
         N = self.entity_size
         B = h.size(0)
-        x = torch.zeros(N, B, dtype=torch.long)
+        x = torch.zeros(N, B, dtype=torch.long, device=h.device)
         x.scatter_(0, h.unsqueeze(0), 1)          # one-hot init [N, B]
         for rb in r_body:
             x = self.propagate(x, rb)
