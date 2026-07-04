@@ -453,11 +453,15 @@ class GroundTrainer(object):
         
 
         logging.info('-------------------------')
-        logging.info('| Final Test MRR: {:.6f}'.format(test_mrr))
+        logging.info('| Best Valid MRR (model selection): {:.6f}'.format(test_mrr))
         logging.info('-------------------------')
 
-        checkpoint = torch.load(os.path.join(self.args.save_path, 'grounding.pt'))
-        self.model.load_state_dict(checkpoint['model'])
+        best_ckpt = os.path.join(self.args.save_path, 'grounding.pt')
+        if os.path.exists(best_ckpt):
+            checkpoint = torch.load(best_ckpt)
+            self.model.load_state_dict(checkpoint['model'])
+        else:
+            logging.info('[eval] No best-valid checkpoint at %s; evaluating current model state.' % best_ckpt)
         
         test_mrr_iter = self.evaluate('valid', args.alpha, expectation=True)
         test_mrr_iter = self.evaluate('test', args.alpha, expectation=True)
@@ -519,13 +523,12 @@ class GroundTrainer(object):
                 total_size += mask.sum().item()
             
             if (batch_id + 1) % print_every == 0:
-                
-                
                 logging.info('loss:    {} {} {:.6f} {:.1f}'.format(batch_id + 1, len(train_dataloader), loss, total_size / print_every))
-                
                 total_loss = 0.0
                 total_size = 0.0
-                self.save(args, os.path.join(args.save_path, 'grounding.pt'))
+                # Intentionally NOT checkpointing here: grounding.pt is written
+                # only on a best-valid improvement in train(), so the model
+                # reloaded for the final valid/test eval is the best-valid one.
         
 
     @torch.no_grad()
