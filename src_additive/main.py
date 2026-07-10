@@ -124,6 +124,21 @@ def parse_args(args=None):
                         help='Path to rule_precision.pt (written by '
                              'scripts/rule_precision_train.py). Required with '
                              '--precision_binary.')
+
+    # === Learned per-rule logistic-regression aggregation ===
+    parser.add_argument('--logreg_binary', action='store_true', default=False,
+                        help='Weight rules by the per-rule logistic-regression '
+                             'coefficients beta_R (from rule_logreg.pt) fitted by '
+                             'BCE on a leave-one-out train design matrix, with '
+                             'binary activation (1 if rule fired) and no per-entity '
+                             'bias. Same score form as --precision_binary but with '
+                             'LEARNED weights instead of frozen precision. Implies '
+                             '--simple_aggregation. Use --logreg_file to point at '
+                             'the rule_logreg.pt to load.')
+    parser.add_argument('--logreg_file', type=str, default=None,
+                        help='Path to rule_logreg.pt (written by '
+                             'scripts/rule_logreg_train.py). Required with '
+                             '--logreg_binary.')
     parser.add_argument('--dump_ranks', action='store_true', default=False,
                         help='Write per-query filtered ranks (h, r, t, L, H) to '
                              'ranks_<split>.csv in --save_path during evaluation.')
@@ -142,6 +157,8 @@ def main():
     cli_clamp_negative_confidence = args.clamp_negative_confidence
     cli_precision_binary = args.precision_binary
     cli_precision_file = args.precision_file
+    cli_logreg_binary = args.logreg_binary
+    cli_logreg_file = args.logreg_file
     cli_dump_ranks = args.dump_ranks
     cli_num_iters = args.num_iters  # None-sentinel below: argparse default is 20
     # Sentinel: argparse default is -1 meaning "not provided, use config value".
@@ -161,9 +178,12 @@ def main():
     args.clamp_negative_confidence = cli_clamp_negative_confidence
     args.precision_binary = cli_precision_binary
     args.precision_file = cli_precision_file
+    args.logreg_binary = cli_logreg_binary
+    args.logreg_file = cli_logreg_file
     args.dump_ranks = cli_dump_ranks
-    # --paper_sum, --no_bias and --precision_binary all force simple_aggregation
-    if cli_paper_sum or cli_no_bias or cli_precision_binary:
+    # --paper_sum, --no_bias, --precision_binary and --logreg_binary all force
+    # simple_aggregation
+    if cli_paper_sum or cli_no_bias or cli_precision_binary or cli_logreg_binary:
         args.simple_aggregation = True
     else:
         args.simple_aggregation = cli_simple_aggregation

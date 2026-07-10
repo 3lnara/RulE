@@ -356,8 +356,10 @@ def main():
     id_to_body = {rule[0]: rule[2:] for rule in rules}
 
     # ---- Rule metadata: head + body length are always derivable from the rule
-    # file (gid == line index in load_rules), so the precision computation runs
-    # fully from scratch -- no rule_meta.pt or checkpoint required.
+    # file. load_rules assigns gid as a sequential counter over kept rules, so
+    # gid == list position here; heads_meta/lengths_meta (indexed by list
+    # position) therefore align with precision[gid]. No rule_meta.pt or
+    # checkpoint required.
     lengths_meta = np.array([len(r[2:]) for r in rules], dtype=np.int64)
     heads_meta   = np.array([r[1]       for r in rules], dtype=np.int64)
 

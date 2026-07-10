@@ -402,7 +402,55 @@ class GroundTrainer(object):
         # w_R is warm-started from the raw RulE confidence (gamma_rule - d, Eq. 6)
         # and stored as a frozen buffer -- NO sigmoid -- so the additive score
         # matches the paper's "sum (w/o MLP)" baseline exactly.
-        if getattr(args, 'precision_binary', False):
+        if getattr(args, 'logreg_binary', False):
+            # === Learned logistic-regression x binary aggregation ===
+            # Per-rule weight = logistic-regression coefficient beta_R (from
+            # rule_logreg.pt), fitted by BCE on a leave-one-out train design
+            # matrix. Same in-model score form as --precision_binary --
+            # binary activation, no per-entity bias -- but with LEARNED weights
+            # instead of frozen PCA precision:
+            #     score(t) = sum_R beta_R * 1[rule R fired h->t].
+            # The fitted intercept b is a constant added to every candidate tail
+            # within a query, so it does NOT change the per-query ranking; it is
+            # therefore omitted here (use_bias=False) exactly like the precision
+            # baseline. beta can be negative (a rule that fires predominantly on
+            # non-answers), which is fine for an additive score.
+            logreg_file = getattr(args, 'logreg_file', None)
+            if logreg_file is None:
+                raise ValueError(
+                    '--logreg_binary requires --logreg_file pointing at a '
+                    'rule_logreg.pt (written by scripts/rule_logreg_train.py).')
+            logging.info('[logreg_binary] loading learned weights from %s'
+                         % logreg_file)
+            lr_data = torch.load(logreg_file, map_location=self.device,
+                                 weights_only=False)
+            beta = lr_data['beta'].float()
+            R = self.model.rule_features.size(0)
+            if beta.size(0) != R:
+                raise ValueError(
+                    'rule_logreg.pt has %d entries but the model has %d rules. '
+                    'Ensure both come from the same dataset/rule_file.'
+                    % (beta.size(0), R))
+            # Align beta to model rule rows via the global rule id stored in
+            # rule_features[:, 0]; NaN (should not occur -- unfired rules get
+            # beta 0 during the fit) -> 0.0 for safety.
+            gids = self.model.rule_features[:, 0].long().to(beta.device)
+            w = torch.nan_to_num(beta[gids], nan=0.0)
+            intercept = float(lr_data.get('intercept',
+                                          torch.tensor(0.0)).item())
+            n_pos = int((w > 0).sum().item())
+            n_neg = int((w < 0).sum().item())
+            self.model.register_buffer('rule_weight_logit',
+                                       w.to(self.device).clone())
+            self.model.simple_aggregation = True
+            self.model.paper_sum = True          # binary activation
+            self.model.use_bias = False          # intercept omitted (rank-invariant)
+            self.model.bias.requires_grad_(False)
+            logging.info('[logreg_binary] ENABLED: binary activation, no bias, '
+                         'learned per-rule beta '
+                         '(pos:%d neg:%d /%d, intercept=%.4f omitted from ranking).'
+                         % (n_pos, n_neg, R, intercept))
+        elif getattr(args, 'precision_binary', False):
             # === Precision x binary aggregation ===
             # Per-rule weight = empirical train PCA precision (from
             # rule_precision.pt) instead of the frozen RulE confidence. Binary

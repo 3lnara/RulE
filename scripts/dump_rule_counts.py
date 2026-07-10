@@ -182,14 +182,25 @@ class MinimalGraph:
 # ---------------------------------------------------------------------------
 
 def load_rules(rule_file: str, num_relations: int):
-    """Returns list of [global_id, r_head, b1, b2, ...] (no padding)."""
+    """Returns list of [global_id, r_head, b1, b2, ...] (no padding).
+
+    global_id is a sequential counter over kept rules (lines with >= 2 tokens),
+    NOT the raw file line number. This MUST match src_additive/data.py
+    RuleDataset, which skips len<=1 lines and assigns the same sequential idx to
+    rule_features[:, 0]. If a rule file has skipped lines (e.g. WN18RR has 4
+    single-token lines), using the line number here would mis-align the
+    rule_precision.pt weights against the model's rules and overflow the
+    per-rule arrays in rule_precision_train.compute_precision.
+    """
     rules = []
+    gid = 0
     with open(rule_file) as f:
-        for idx, line in enumerate(f):
+        for line in f:
             parts = line.strip().split()
             if len(parts) < 2:
                 continue
-            rules.append([idx] + [int(p) for p in parts])
+            rules.append([gid] + [int(p) for p in parts])
+            gid += 1
     return rules
 
 
@@ -246,74 +257,128 @@ def compute_unclamped_weights(model, device: torch.device) -> torch.Tensor:
 # ---------------------------------------------------------------------------
 
 def dump_split(model, graph: MinimalGraph, split_name: str,
-               device: torch.device) -> dict:
-    """Ground every query in split_name; return CSR count structure."""
+               device: torch.device, chunk: int = 0) -> dict:
+    """Ground every query in split_name; return CSR count structure.
+
+    Grounding runs on `device` (CPU or CUDA). Firing extraction is fully
+    VECTORIZED -- a single counts.nonzero() per (rule, query-block) instead of a
+    Python per-query loop -- so GPU grounding is not throttled by host<->device
+    syncs (one .cpu() per rule-block, not per query). `chunk` caps how many
+    queries of a relation are grounded at once, bounding the [B, N] count tensor
+    (0 = all queries of the relation in one block; fine for small N like UMLS,
+    but set e.g. 512 for WN18RR/FB15k).
+    """
     facts = getattr(graph, f"{split_name}_facts")   # list of (h, r, t)
-
-    # Build per-relation query groups to batch the grounding call.
-    # Use the SAME ordering as facts so we can build a flat query list.
-    rel2queries = defaultdict(list)   # r -> [(query_idx, h, t)]
-    query_h    = []
-    query_r    = []
-    query_gold = []
-    for qi, (h, r, t) in enumerate(facts):
-        query_h.append(h)
-        query_r.append(r)
-        query_gold.append(t)
-        rel2queries[r].append((qi, h, t))
-
     Q = len(facts)
-    per_query_entries = [[] for _ in range(Q)]   # (rule_id, ent, cnt)
+    query_h    = torch.tensor([h for h, _, _ in facts], dtype=torch.long)
+    query_r    = torch.tensor([r for _, r, _ in facts], dtype=torch.long)
+    query_gold = torch.tensor([t for _, _, t in facts], dtype=torch.long)
+
+    # Per-relation query groups (preserve global query index qi).
+    rel2queries = defaultdict(list)   # r -> [(qi, h)]
+    for qi, (h, r, t) in enumerate(facts):
+        rel2queries[r].append((qi, h))
+
+    qi_parts, rule_parts, ent_parts, cnt_parts = [], [], [], []
 
     t0 = time.time()
     for r, qlist in sorted(rel2queries.items()):
         rules_for_r = model.relation2rules[r]
         if not rules_for_r:
             continue
+        Bn = len(qlist)
+        step = Bn if (chunk is None or chunk <= 0) else chunk
+        for blk in range(0, Bn, step):
+            block = qlist[blk:blk + step]
+            h_t  = torch.tensor([h for _, h in block], dtype=torch.long, device=device)
+            qi_t = torch.tensor([qi for qi, _ in block], dtype=torch.long, device=device)
 
-        all_h_list = [h for (_, h, _) in qlist]
-        all_h_t    = torch.tensor(all_h_list, dtype=torch.long, device=device)
-        local2qi   = [qi for (qi, _, _) in qlist]
-
-        for rule_global_id, (r_head, r_body) in rules_for_r:
-            assert r_head == r
-            with torch.no_grad():
-                counts = graph.grounding(all_h_t, r_head, r_body, None)
-                counts = counts.long()    # [batch, N]
-
-            for local_i, qi in enumerate(local2qi):
-                row = counts[local_i]                          # [N]
-                nz  = row.nonzero(as_tuple=True)[0]
-                if nz.numel() == 0:
-                    continue
-                for e_idx, c_val in zip(nz.tolist(), row[nz].tolist()):
-                    per_query_entries[qi].append(
-                        (rule_global_id, e_idx, min(c_val, 32767))
-                    )
+            for rule_global_id, (r_head, r_body) in rules_for_r:
+                assert r_head == r
+                with torch.no_grad():
+                    counts = graph.grounding(h_t, r_head, r_body, None).long()  # [b, N]
+                    nz = counts.nonzero(as_tuple=False)          # [K, 2] (local_i, ent)
+                    if nz.size(0) == 0:
+                        continue
+                    li   = nz[:, 0]
+                    ent  = nz[:, 1]
+                    cval = counts[li, ent].clamp(max=32767)
+                qi_parts.append(qi_t[li].cpu())
+                ent_parts.append(ent.cpu())
+                cnt_parts.append(cval.cpu().to(torch.short))
+                rule_parts.append(torch.full((nz.size(0),), rule_global_id,
+                                             dtype=torch.long))
 
     elapsed = time.time() - t0
     print(f"  grounding loop done in {elapsed:.1f}s")
 
-    # Pack into CSR
-    q_ptr_list   = [0]
-    rule_id_list = []
-    ent_list     = []
-    cnt_list     = []
-    for qi in range(Q):
-        for (rid, e, c) in per_query_entries[qi]:
-            rule_id_list.append(rid)
-            ent_list.append(e)
-            cnt_list.append(c)
-        q_ptr_list.append(len(rule_id_list))
+    # Concatenate flat firings and group into CSR by query index. Ranking scores
+    # scatter_add per query, so within-query order is irrelevant; a plain sort by
+    # qi is enough to build q_ptr.
+    if qi_parts:
+        qi_all   = torch.cat(qi_parts)
+        ent_all  = torch.cat(ent_parts)
+        cnt_all  = torch.cat(cnt_parts)
+        rule_all = torch.cat(rule_parts)
+        order    = torch.argsort(qi_all)
+        qi_all, ent_all = qi_all[order], ent_all[order]
+        cnt_all, rule_all = cnt_all[order], rule_all[order]
+        q_ptr = torch.zeros(Q + 1, dtype=torch.long)
+        q_ptr[1:] = torch.cumsum(torch.bincount(qi_all, minlength=Q), dim=0)
+    else:
+        ent_all  = torch.zeros(0, dtype=torch.long)
+        cnt_all  = torch.zeros(0, dtype=torch.short)
+        rule_all = torch.zeros(0, dtype=torch.long)
+        q_ptr    = torch.zeros(Q + 1, dtype=torch.long)
 
     return {
-        "query_h":    torch.tensor(query_h,    dtype=torch.long),
-        "query_r":    torch.tensor(query_r,    dtype=torch.long),
-        "query_gold": torch.tensor(query_gold, dtype=torch.long),
-        "q_ptr":      torch.tensor(q_ptr_list, dtype=torch.long),
-        "rule_id":    torch.tensor(rule_id_list, dtype=torch.long),
-        "ent":        torch.tensor(ent_list,   dtype=torch.long),
-        "cnt":        torch.tensor(cnt_list,   dtype=torch.short),
+        "query_h":    query_h,
+        "query_r":    query_r,
+        "query_gold": query_gold,
+        "q_ptr":      q_ptr,
+        "rule_id":    rule_all,
+        "ent":        ent_all,
+        "cnt":        cnt_all,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Per-query KGE score dump  (kge[q, t] = model.compute_g_KGE for query q)
+# ---------------------------------------------------------------------------
+
+def dump_kge(model, graph: MinimalGraph, split_name: str,
+             device: torch.device, chunk: int = 256) -> dict:
+    """Dump the frozen KGE (RotatE) score of every entity for every query.
+
+    Returns {'query_h','query_r','query_gold','kge'} where kge is a [Q, N]
+    float16 tensor. The score is independent of rules / weights / alpha, so it
+    is dumped once and reused across the whole (L2 x alpha) sweep in
+    scripts/select_logreg.py. Row order matches counts_<split>.pt exactly (both
+    iterate getattr(graph, '<split>_facts') in order).
+    """
+    facts = getattr(graph, f"{split_name}_facts")
+    Q = len(facts)
+    N = graph.entity_size
+    query_h = torch.tensor([h for h, _, _ in facts], dtype=torch.long)
+    query_r = torch.tensor([r for _, r, _ in facts], dtype=torch.long)
+    query_g = torch.tensor([t for _, _, t in facts], dtype=torch.long)
+
+    kge = torch.empty(Q, N, dtype=torch.float16)
+    t0 = time.time()
+    with torch.no_grad():
+        for s in range(0, Q, chunk):
+            e = min(s + chunk, Q)
+            h = query_h[s:e].to(device)
+            r = query_r[s:e].to(device)
+            scores = model.compute_g_KGE(h, r)            # [b, N]
+            kge[s:e] = scores.detach().to("cpu", torch.float16)
+    print(f"  KGE dump done in {time.time() - t0:.1f}s  shape={tuple(kge.shape)}")
+
+    return {
+        "query_h":    query_h,
+        "query_r":    query_r,
+        "query_gold": query_g,
+        "kge":        kge,
     }
 
 
@@ -333,6 +398,24 @@ def parse_args():
     p.add_argument("--out_dir",
                    default="outputs/additive_umls_aggregation_2x2/analysis")
     p.add_argument("--splits", nargs="+", default=["valid", "test"])
+    p.add_argument("--device", default="cpu", choices=["cpu", "cuda"],
+                   help="Device for grounding AND the KGE score dump. Use 'cuda' "
+                        "for large datasets (WN18RR/FB15k); falls back to cpu if "
+                        "CUDA is unavailable.")
+    p.add_argument("--grounding_chunk", type=int, default=0,
+                   help="Queries per grounding block within a relation, bounding "
+                        "the [B, N] count tensor. 0 = all queries of the relation "
+                        "at once (fine for small N like UMLS); set e.g. 512 for "
+                        "WN18RR/FB15k.")
+    p.add_argument("--dump_kge", action="store_true", default=False,
+                   help="Also dump per-query frozen KGE (RotatE) scores to "
+                        "kge_<split>.pt [Q, N] float16, for the offline rule+KGE "
+                        "alpha sweep in scripts/select_logreg.py.")
+    p.add_argument("--kge_chunk", type=int, default=256,
+                   help="Queries per KGE batch. The RotatE tail tensor is "
+                        "[kge_chunk, N, dim], so for large N (e.g. WN18RR "
+                        "N=40943) use a SMALL value (8-32) to bound memory; the "
+                        "default 256 is only safe for small N like UMLS.")
     return p.parse_args()
 
 
@@ -340,7 +423,14 @@ def main():
     args = parse_args()
     os.chdir(_REPO_ROOT)
     os.makedirs(args.out_dir, exist_ok=True)
-    device = torch.device("cpu")
+
+    if args.device == "cuda" and not torch.cuda.is_available():
+        print("  WARNING: --device cuda requested but CUDA is unavailable; "
+              "using cpu.")
+        device = torch.device("cpu")
+    else:
+        device = torch.device(args.device)
+    print(f"device: {device}  grounding_chunk: {args.grounding_chunk or 'none'}")
 
     # Config
     with open(args.config) as f:
@@ -362,6 +452,7 @@ def main():
     ckpt  = torch.load(args.checkpoint, map_location=device)
     state = ckpt["model"] if "model" in ckpt else ckpt
     model.load_state_dict(state, strict=False)
+    model.to(device)
     model.eval()
     print(f"  loaded from {args.checkpoint}")
 
@@ -390,18 +481,18 @@ def main():
     rule_meta = {
         "head":          torch.tensor(heads,   dtype=torch.long),
         "length":        torch.tensor(lengths, dtype=torch.long),
-        "w_R_unclamped": w_unclamped,
+        "w_R_unclamped": w_unclamped.cpu(),
         "bodies":        bodies,
     }
     meta_path = os.path.join(args.out_dir, "rule_meta.pt")
     torch.save(rule_meta, meta_path)
     print(f"  saved rule_meta.pt  ({len(rules)} rules)")
 
-    # Dump each split
+    # Dump each split (grounding + KGE share `device`; both saved as CPU tensors).
     for split in args.splits:
         print(f"\nDumping split '{split}'...")
         t_start = time.time()
-        csr = dump_split(model, graph, split, device)
+        csr = dump_split(model, graph, split, device, chunk=args.grounding_chunk)
         elapsed = time.time() - t_start
         nnz = csr["rule_id"].numel()
         Q   = csr["query_h"].numel()
@@ -409,6 +500,12 @@ def main():
         out_path = os.path.join(args.out_dir, f"counts_{split}.pt")
         torch.save(csr, out_path)
         print(f"  saved counts_{split}.pt")
+
+        if args.dump_kge:
+            kge = dump_kge(model, graph, split, device, chunk=args.kge_chunk)
+            kge_path = os.path.join(args.out_dir, f"kge_{split}.pt")
+            torch.save(kge, kge_path)
+            print(f"  saved kge_{split}.pt")
 
     print("\nDone.")
 
