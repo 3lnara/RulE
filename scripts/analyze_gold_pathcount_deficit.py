@@ -127,6 +127,9 @@ def main():
 
     # per-rule (gold-activated rule instance) tallies
     T = E = C = O = Ti = D = 0
+    # per-rule-id sign coherence: does a rule ever act BOTH as a dominant
+    # signal for gold and as an out-multiplying signal against gold?
+    rule_ctx = defaultdict(lambda: {"excl": 0, "dom": 0, "out": 0, "tied": 0})
     # pairwise (gold-rule, co-firing competitor) tallies
     P = p_lower = p_equal = p_higher = 0
     # per-query / overall-quantity tallies
@@ -166,6 +169,7 @@ def main():
             T += 1
             if not cofire:
                 E += 1
+                rule_ctx[R]["excl"] += 1
                 continue
             C += 1
             n_contested += 1
@@ -180,14 +184,17 @@ def main():
             # per-rule verdict
             if g_cnt < max_c:
                 O += 1; n_out += 1
+                rule_ctx[R]["out"] += 1
                 gap = max_c - g_cnt
                 if worst_gap is None or gap > worst_gap:
                     worst_gap = gap; worst_rule = R
                     worst_comp = max(cofire, key=lambda t: t[1])[0]
             elif g_cnt == max_c:
                 Ti += 1
+                rule_ctx[R]["tied"] += 1
             else:                                  # gold strictly dominates
                 D += 1; n_dom += 1
+                rule_ctx[R]["dom"] += 1
                 gap = g_cnt - max_c
                 if best_gap is None or gap > best_gap:
                     best_gap = gap; best_rule = R
@@ -271,6 +278,17 @@ def main():
           f"{q_tot_tied:5d}  ({pct(q_tot_tied,q_grounded):5.1f}%)")
     print(f"  gold's total paths HIGHER (most paths overall):    "
           f"{q_tot_higher:5d}  ({pct(q_tot_higher,q_grounded):5.1f}%)")
+
+    n_rules_fired = len(rule_ctx)
+    sign_incoherent = [R for R, v in rule_ctx.items() if v["dom"] > 0 and v["out"] > 0]
+    contested = {R: v["dom"] + v["out"] + v["tied"] for R, v in rule_ctx.items()}
+    tot_c = sum(contested.values())
+    inc_c = sum(contested[R] for R in sign_incoherent)
+    print(f"\n[E] Sign coherence of the count DoF (rules gold ever fires): "
+          f"rules={n_rules_fired}")
+    print(f"  sign-INCOHERENT (dominant in >=1 query AND out-multiplied in >=1): "
+          f"{len(sign_incoherent):5d}  ({pct(len(sign_incoherent), n_rules_fired):5.1f}%)")
+    print(f"  share of contested firings on those rules: {pct(inc_c, tot_c):5.1f}%")
 
     # worst out-multiplied queries
     ranked = sorted([x for x in rows if x["n_out_multiplied"] > 0],

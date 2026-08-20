@@ -289,7 +289,11 @@ def main():
     # ---- Load rule meta (always needed for alignment check in precision mode) ----
     meta_path = os.path.join(args.analysis_dir, "rule_meta.pt")
     print(f"Loading rule_meta from {meta_path} ...")
-    meta = torch.load(meta_path, weights_only=False)
+    try:
+        meta = torch.load(meta_path, weights_only=False)
+    except TypeError:
+        # PyTorch < 1.13 (e.g. local rule_env on 1.11) has no weights_only kwarg
+        meta = torch.load(meta_path)
     w_R_unclamped: torch.Tensor = meta["w_R_unclamped"].float()
     R = w_R_unclamped.size(0)
     print(f"  rules={R}  negative w_R={int((w_R_unclamped < 0).sum())}")
@@ -299,7 +303,10 @@ def main():
     if args.weight_source == "precision":
         prec_path = args.precision_file or os.path.join(args.analysis_dir, "rule_precision.pt")
         print(f"Loading precision weights from {prec_path} ...")
-        prec_data = torch.load(prec_path, weights_only=False)
+        try:
+            prec_data = torch.load(prec_path, weights_only=False)
+        except TypeError:
+            prec_data = torch.load(prec_path)   # torch < 1.13 has no weights_only
         prec_tensor: torch.Tensor = prec_data["precision"].float()
         if prec_tensor.size(0) != R:
             raise ValueError(
@@ -327,7 +334,10 @@ def main():
     for split in args.splits:
         counts_path = os.path.join(args.analysis_dir, f"counts_{split}.pt")
         print(f"\nLoading {counts_path} ...")
-        counts = torch.load(counts_path, weights_only=False)
+        try:
+            counts = torch.load(counts_path, weights_only=False)
+        except TypeError:
+            counts = torch.load(counts_path)   # torch < 1.13 has no weights_only
         query_h    = counts["query_h"]
         query_r    = counts["query_r"]
         query_gold = counts["query_gold"]

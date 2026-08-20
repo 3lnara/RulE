@@ -41,11 +41,16 @@ drops out under leave-one-out, exactly as it is unrankable at eval time.
 Fit
 --------------------------------------------------------------------------------
     logits = X @ beta + b
-    loss   = BCEWithLogitsLoss(logits, y) [+ optional pos_weight] + l2 * ||beta||^2
+    loss   = data_loss(logits, y) [+ optional pos_weight]
+             + l2 * ||beta||^2
 
-Optimised with L-BFGS (logistic regression is convex). Rules that never fire get
-beta_R = 0 (no rows reference them; L2 keeps them at 0), and contribute nothing
-at eval -- matching precision_binary's nan->0 handling.
+data_loss is one of BCE (logistic regression), MSE (OLS), or squared hinge
+(linear SVM), selected by --loss; see fit_logreg's docstring. All three share the
+identical in-model score form, so nothing downstream changes: the fitted beta is
+swept and selected by scripts/select_logreg.py exactly the same way, and
+--logreg_binary loads it unchanged. Rules that never fire get beta_R = 0 (no rows
+reference them), and contribute nothing at eval -- matching precision_binary's
+nan->0 handling.
 
 The intercept b is learned (it matters for the BCE fit / calibration) but is a
 CONSTANT added to every candidate tail within a query, so it does NOT change the
@@ -335,35 +340,66 @@ def fit_logreg(
     max_iter: int = 200,
     pos_weight: float = None,
     grad_tol: float = 1e-4,
+    loss: str = "bce",
 ):
-    """Fit sigmoid(X @ beta + b) by BCE with L-BFGS. Returns (beta[R], b).
+    """Fit a linear-additive aggregator  score = X @ beta + b  by L-BFGS, with an
+    L2 (ridge) penalty and one of three convex, smooth losses. Returns (beta[R], b).
 
-    Prints a convergence certificate. The objective is convex (ridge logistic
-    regression), so its optimum is unique and characterised by a ZERO gradient:
-      * ||grad||_inf  ~ 0   => we reached the global penalised MLE (the
-        certificate). grad_tol is the threshold for the CONVERGED verdict.
-      * iters < max_iter     => L-BFGS stopped on its own tolerance, not the cap.
-    Plus coefficient-stability signals:
-      * ||beta||_2, max|beta| => a very large max|beta| flags (quasi-)separation,
-        where L2 -- not the data -- pins the coefficient down (raise --l2).
-      * being convex + zero-init + deterministic, a re-run gives identical beta.
+        loss='bce'           binary cross-entropy       -> LOGISTIC REGRESSION
+                             (BCEWithLogitsLoss); beta = log-odds contribution,
+                             score = logit of P(fact true), calibrated.
+        loss='mse'           squared error to {0,1}      -> LINEAR / RIDGE (OLS)
+                             (the linear probability model); beta = additive
+                             change in a [0,1]-ish score (NOT a probability).
+        loss='squared_hinge' squared hinge, labels +/-1  -> LINEAR SVM
+                             mean max(0, 1 - s*score)^2, s = 2y-1; beta = margin
+                             coefficients, score = signed distance (NOT a prob).
+
+    All three share the SAME additive score form, so in-model --logreg_binary and
+    the offline selection/parity stack treat them identically -- this is exactly
+    the OLS/SVM-vs-logreg comparison: same design matrix, same L2 grid, same
+    ranking machinery, only the loss (hence the MEANING of beta) differs.
+
+    Prints a convergence certificate. Each objective is convex + C^1 (the square
+    on the hinge smooths its kink), so the optimum is unique and characterised by
+    a ZERO gradient:
+      * ||grad||_inf ~ 0  => global penalised optimum reached (grad_tol threshold).
+      * iters < max_iter   => L-BFGS stopped on its own tolerance, not the cap.
+    Plus coefficient-stability signals (||beta||_2, max|beta|); convex + zero-init
+    + deterministic => a re-run gives identical beta.
     """
     if M == 0:
         print("  WARNING: empty design matrix; returning zero weights.")
         return torch.zeros(R), torch.zeros(())
+    if loss not in ("bce", "mse", "squared_hinge"):
+        raise ValueError(f"fit_logreg: unknown loss {loss!r}")
 
     indices = torch.stack([rows, cols], dim=0).to(device)
     values  = torch.ones(rows.numel(), dtype=torch.float32, device=device)
     X = torch.sparse_coo_tensor(indices, values, (M, R), device=device).coalesce()
     y = y.to(device)
+    s_pm = (2.0 * y - 1.0) if loss == "squared_hinge" else None   # +/-1 labels
 
     beta = torch.zeros(R, 1, device=device, requires_grad=True)
     b    = torch.zeros(1, device=device, requires_grad=True)
 
-    pw = None
-    if pos_weight is not None and pos_weight > 0:
-        pw = torch.tensor(float(pos_weight), device=device)
-    bce = torch.nn.BCEWithLogitsLoss(pos_weight=pw)
+    # pos_weight upweights the positive-class term (ranking-invariant; only
+    # rescales beta/calibration). For BCE we use the built-in pos_weight; for
+    # mse/hinge we weight the per-row loss the same way.
+    have_pw = pos_weight is not None and pos_weight > 0
+    pw = torch.tensor(float(pos_weight), device=device) if have_pw else None
+    bce = torch.nn.BCEWithLogitsLoss(pos_weight=pw) if loss == "bce" else None
+    wrow = (torch.where(y > 0.5, torch.full_like(y, float(pos_weight)),
+                        torch.ones_like(y)) if (have_pw and loss != "bce") else None)
+
+    def data_loss(logits):
+        if loss == "bce":
+            return bce(logits, y)
+        if loss == "mse":
+            e = (logits - y) ** 2
+            return (wrow * e).mean() if wrow is not None else e.mean()
+        margin = torch.clamp(1.0 - s_pm * logits, min=0.0) ** 2   # squared hinge
+        return (wrow * margin).mean() if wrow is not None else margin.mean()
 
     optimizer = torch.optim.LBFGS(
         [beta, b], lr=1.0, max_iter=max_iter,
@@ -374,10 +410,10 @@ def fit_logreg(
     def closure():
         optimizer.zero_grad()
         logits = torch.sparse.mm(X, beta).squeeze(1) + b   # [M]
-        loss = bce(logits, y) + l2 * (beta * beta).sum()
-        loss.backward()
-        state["loss"] = float(loss.item())
-        return loss
+        loss_val = data_loss(logits) + l2 * (beta * beta).sum()
+        loss_val.backward()
+        state["loss"] = float(loss_val.item())
+        return loss_val
 
     optimizer.step(closure)
 
@@ -394,20 +430,27 @@ def fit_logreg(
 
     with torch.no_grad():
         logits = torch.sparse.mm(X, beta).squeeze(1) + b
-        pred = (logits > 0).float()
+        # Decision threshold + per-class score summary depend on the loss: BCE
+        # thresholds logits at 0 (prob 0.5) and summarises sigmoid probs; MSE
+        # thresholds the [0,1] target at 0.5 and summarises the raw prediction;
+        # hinge thresholds the decision value at 0 and summarises it.
+        if loss == "mse":
+            pred = (logits > 0.5).float(); summ = logits; slabel = "mean_pred"
+        elif loss == "squared_hinge":
+            pred = (logits > 0).float();   summ = logits; slabel = "mean_score"
+        else:
+            pred = (logits > 0).float();   summ = torch.sigmoid(logits); slabel = "mean_p"
         acc = float((pred == y).float().mean().item())
-        # Training AUROC-free sanity: mean predicted prob on pos vs neg.
-        prob = torch.sigmoid(logits)
-        mp = float(prob[y > 0.5].mean().item()) if (y > 0.5).any() else float("nan")
-        mn = float(prob[y < 0.5].mean().item()) if (y < 0.5).any() else float("nan")
+        sp = float(summ[y > 0.5].mean().item()) if (y > 0.5).any() else float("nan")
+        sn = float(summ[y < 0.5].mean().item()) if (y < 0.5).any() else float("nan")
         bnorm = float(beta.norm())
         bmax  = float(beta.abs().max())
         bval  = float(b.item())
 
     verdict = "CONVERGED" if converged else "NOT CONVERGED"
-    print(f"  L-BFGS {verdict}  iters={n_iter}/{max_iter}  "
+    print(f"  L-BFGS[{loss}] {verdict}  iters={n_iter}/{max_iter}  "
           f"final_loss={state['loss']:.5f}  ||grad||inf={grad_inf:.2e}")
-    print(f"         train_acc={acc:.4f}  mean_p(pos)={mp:.4f}  mean_p(neg)={mn:.4f}  "
+    print(f"         train_acc={acc:.4f}  {slabel}(pos)={sp:.4f}  {slabel}(neg)={sn:.4f}  "
           f"||beta||2={bnorm:.3f}  max|beta|={bmax:.3f}  intercept={bval:+.3f}")
     if hit_cap:
         print(f"         WARNING: L-BFGS hit the {max_iter}-iter cap without "
@@ -416,9 +459,9 @@ def fit_logreg(
         print(f"         WARNING: ||grad||inf={grad_inf:.2e} >= grad_tol={grad_tol:.0e}; "
               f"not at a stationary point (try more iterations / larger --l2).")
     if bmax > 50.0:
-        print(f"         WARNING: max|beta|={bmax:.1f} is large -> possible "
-              f"(quasi-)separation; the coefficient is set by L2, not the data. "
-              f"Increase --l2.")
+        sep = "possible (quasi-)separation; " if loss == "bce" else ""
+        print(f"         WARNING: max|beta|={bmax:.1f} is large -> {sep}the "
+              f"coefficient is set by L2, not the data. Increase --l2.")
     return beta.detach().squeeze(1).cpu(), b.detach().squeeze().cpu()
 
 
@@ -444,6 +487,23 @@ def parse_args():
                    help="Process each relation's known-subject heads in blocks "
                         "of this size to bound the [B, N] mask/message memory "
                         "(useful for WN18RR/FB15k). 0 = no chunking (default).")
+    p.add_argument("--design_cache", default=None,
+                   help="Path to a design_matrix.pt cache. The LOO firing matrix "
+                        "is DETERMINISTIC given (data, rules), so: if this file "
+                        "exists, load it and SKIP grounding (re-sweeping the "
+                        "L2 grid then costs only the cheap refits -- matters on "
+                        "WN18RR/FB15k where grounding dominates); if it does not "
+                        "exist, build the matrix and SAVE it here. Same schema as "
+                        "scripts/build_design_matrix_cache.py, so the two share caches.")
+    p.add_argument("--loss", default="bce",
+                   choices=["bce", "mse", "squared_hinge"],
+                   help="Training loss (all share the SAME additive score form, so "
+                        "this is the logreg-vs-OLS-vs-SVM comparison; only the "
+                        "MEANING of beta changes). 'bce' (default) = LOGISTIC "
+                        "REGRESSION (beta = log-odds, calibrated). 'mse' = LINEAR/"
+                        "OLS regression to {0,1} (beta = additive score, not a "
+                        "probability). 'squared_hinge' = LINEAR SVM (beta = margin "
+                        "coefficients).")
     p.add_argument("--l2", type=float, default=1e-4,
                    help="L2 penalty on beta (ridge) for the PRIMARY saved beta "
                         "(the one loaded by --logreg_binary). Keeps never/rarely-"
@@ -493,7 +553,10 @@ def main():
     print(f"rule_file  : {rule_file}")
     print(f"out_dir    : {args.out_dir}")
     print(f"device     : {device}  chunk_size: {args.chunk_size or 'none'}")
-    print(f"l2         : {args.l2}  max_iter: {args.max_iter}  "
+    _model = {"bce": "logistic regression", "mse": "linear/OLS",
+              "squared_hinge": "linear SVM"}[args.loss]
+    print(f"loss       : {args.loss}  ({_model})")
+    print(f"penalty    : l2  l2: {args.l2}  max_iter: {args.max_iter}  "
           f"pos_weight: {args.pos_weight or 'natural'}")
 
     # ---- Graph + rules -------------------------------------------------------
@@ -519,10 +582,43 @@ def main():
     total_known = sum(len(v) for v in gold.values())
     print(f"  unique (r, h) pairs with >=1 gold tail: {total_known}")
 
-    # ---- Design matrix (leave-one-out) ---------------------------------------
-    print("\nBuilding leave-one-out design matrix (grounding from known heads)...")
-    rows, cols, y, fired_total, gold_fired, M = build_design_matrix(
-        graph, rules, gold, device=device, chunk_size=args.chunk_size)
+    # ---- Design matrix: load from cache or build (grounding) -----------------
+    # The LOO firing matrix is deterministic given (data, rules), so a cache is an
+    # exact stand-in for re-grounding. This makes an L2 grid EXTENSION cheap:
+    # ground once, then every re-sweep is pure-CPU refits.
+    cache_path = args.design_cache
+    if cache_path and os.path.isfile(cache_path):
+        print(f"\nLoading cached design matrix from {cache_path} (skipping grounding)...")
+        dm = torch.load(cache_path, map_location="cpu")
+        if int(dm["R"]) != R:
+            raise SystemExit(
+                f"design cache R={int(dm['R'])} != num_rules {R}: the cache was "
+                f"built for a different rule file. Delete it or point --design_cache "
+                f"elsewhere.")
+        rows        = dm["rows"]
+        cols        = dm["cols"]
+        y           = dm["y"]
+        M           = int(dm["M"])
+        fired_total = dm["support"].numpy()
+        gold_fired  = dm["gold_fired"].numpy()
+        print(f"  M={M}  nnz={rows.numel()}  positives={int(y.sum().item())}  "
+              f"rules with support>0: {int((fired_total > 0).sum())}/{R}")
+    else:
+        print("\nBuilding leave-one-out design matrix (grounding from known heads)...")
+        rows, cols, y, fired_total, gold_fired, M = build_design_matrix(
+            graph, rules, gold, device=device, chunk_size=args.chunk_size)
+        if cache_path:
+            os.makedirs(os.path.dirname(os.path.abspath(cache_path)), exist_ok=True)
+            torch.save({
+                "rows": rows, "cols": cols, "y": y, "M": int(M), "R": int(R),
+                "support":    torch.tensor(fired_total, dtype=torch.long),
+                "gold_fired": torch.tensor(gold_fired, dtype=torch.long),
+                "head":       torch.tensor(heads_meta, dtype=torch.long),
+                "length":     torch.tensor(lengths_meta, dtype=torch.long),
+                "meta": {"data_path": args.data_path, "rule_file": rule_file,
+                         "num_rows": int(M), "num_rules": int(R)},
+            }, cache_path)
+            print(f"  cached design matrix -> {cache_path} (re-sweeps now skip grounding)")
 
     # ---- Fit logistic regression (single L2 or a log grid) --------------------
     # The design matrix is built once above; each L2 is a cheap refit. The
@@ -530,37 +626,41 @@ def main():
     # stays well defined. beta_grid rows line up with l2_grid for the offline
     # alpha/L2 selection in scripts/select_logreg.py.
     pw = (args.pos_weight if args.pos_weight > 0 else None)
-    if args.l2_grid:
-        l2_values = sorted(set(list(args.l2_grid) + [args.l2]))
-    else:
-        l2_values = [args.l2]
+    primary = args.l2
+    grid    = args.l2_grid
+    strengths = sorted(set(list(grid) + [primary])) if grid else [primary]
 
-    print("\nFitting per-rule logistic regression (L-BFGS)...")
+    model_name = {"bce": "logistic regression", "mse": "linear/OLS regression",
+                  "squared_hinge": "linear SVM"}[args.loss]
+    print(f"\nFitting per-rule {model_name} (L-BFGS, loss={args.loss}, L2)...")
     beta_rows, intercepts = [], []
-    for l2 in l2_values:
-        print(f"  L2={l2:g}:")
-        beta_l2, b_l2 = fit_logreg(
+    for s in strengths:
+        print(f"  L2={s:g}:")
+        beta_s, b_s = fit_logreg(
             rows, cols, y, M, R, device=device,
-            l2=l2, max_iter=args.max_iter, pos_weight=pw, grad_tol=args.grad_tol)
-        beta_rows.append(beta_l2.numpy().astype(np.float32))
-        intercepts.append(float(b_l2.item()))
+            l2=s, max_iter=args.max_iter, pos_weight=pw, grad_tol=args.grad_tol,
+            loss=args.loss)
+        beta_rows.append(beta_s.numpy().astype(np.float32))
+        intercepts.append(float(b_s.item()))
 
     beta_grid_np = np.stack(beta_rows, axis=0)          # [G, R]
-    l2_grid_np   = np.asarray(l2_values, dtype=np.float64)
-    primary_idx  = l2_values.index(args.l2)
-    beta_np      = beta_grid_np[primary_idx]            # primary beta (at --l2)
+    l2_grid_np   = np.asarray(strengths, dtype=np.float64)
+    primary_idx  = strengths.index(primary)
+    beta_np      = beta_grid_np[primary_idx]            # primary beta
     b_val        = intercepts[primary_idx]
 
     # Regularization path: a coefficient-STABILITY check. ||beta|| should shrink
-    # monotonically as L2 grows; a non-monotone jump signals an unstable fit.
-    if len(l2_values) > 1:
-        print("\n  Regularization path (||beta|| must shrink monotonically with L2):")
-        print(f"    {'L2':>10}  {'||beta||2':>10}  {'max|beta|':>10}")
+    # monotonically as the L2 strength grows; a non-monotone jump signals an
+    # unstable fit.
+    if len(strengths) > 1:
+        print(f"\n  Regularization path (||beta|| must shrink monotonically with L2):")
+        print(f"    {'L2':>10}  {'||beta||2':>10}  {'max|beta|':>10}  {'nnz':>8}")
         prev = None
-        for l2, brow in zip(l2_values, beta_rows):
+        for s, brow in zip(strengths, beta_rows):
             bn = float(np.linalg.norm(brow)); bm = float(np.abs(brow).max())
+            nnz = int((brow != 0).sum())
             flag = "  <-- NOT monotone" if (prev is not None and bn > prev * 1.02 + 1e-4) else ""
-            print(f"    {l2:>10g}  {bn:>10.3f}  {bm:>10.3f}{flag}")
+            print(f"    {s:>10g}  {bn:>10.3f}  {bm:>10.3f}  {nnz:>8}{flag}")
             prev = bn
 
     n_fired = int((fired_total > 0).sum())
@@ -603,8 +703,9 @@ def main():
             "dataset":     dataset,
             "num_rules":   R,
             "num_rows":    M,
+            "loss":        args.loss,        # bce=logreg, mse=OLS, squared_hinge=SVM
             "l2":          args.l2,
-            "l2_grid":     [float(v) for v in l2_values],
+            "l2_grid":     [float(v) for v in strengths],
             "primary_idx": primary_idx,
             "pos_weight":  args.pos_weight,
             "leave_one_out": True,
