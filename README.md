@@ -349,11 +349,11 @@ dumped CSV.
 
 ### Selected hyper-parameters (what the reported numbers use)
 
-| Dataset | L2 grid searched | LogReg (`bce`) | OLS (`mse`) | Linear SVM (`squared_hinge`) |
-| --- | --- | --- | --- | --- |
-| Family | `1e-5 … 1` (6 points) | L2 `1e-4`, alpha `2.0` | L2 `1e-3`, alpha `0.5` | L2 `1e-3`, alpha `0.5` |
-| UMLS | `1e-5 … 1` (6 points) | L2 `1e-4`, alpha `1.0` | L2 `1e-3`, alpha `0.5` | L2 `1e-3`, alpha `0.5` |
-| WN18RR | `1e-8 … 1` (9 points) | L2 `1e-6`, alpha `1.0` | L2 `1e-5`, alpha `0.5` | L2 `1e-5`, alpha `0.5` |
+| Dataset | LogReg (`bce`) | OLS (`mse`) | Linear SVM (`squared_hinge`) |
+| --- | --- | --- | --- |
+| Family | L2 `1e-4`, alpha `2.0` | L2 `1e-3`, alpha `0.5` | L2 `1e-3`, alpha `0.5` |
+| UMLS | L2 `1e-4`, alpha `1.0` | L2 `1e-3`, alpha `0.5` | L2 `1e-3`, alpha `0.5` |
+| WN18RR | L2 `1e-6`, alpha `1.0` | L2 `1e-5`, alpha `0.5` | L2 `1e-5`, alpha `0.5` |
 
 ## RQ3 Interpretability trust table
 
