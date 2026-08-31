@@ -376,3 +376,23 @@ python scripts/plot_trust_table_ecdfs.py \
 Writes `rule_trust_table.csv` (per-rule `support`, `true_fired`,
 `minority_support`, a derived `separated` flag, `precision`, `max_jaccard`,
 `vif`) and `rule_trust_summary.json`.
+
+## Citation
+
+This project builds on RulE. If you use this repository, please cite the original paper:
+
+> Xiaojuan Tang, Song-Chun Zhu, Yitao Liang, and Muhan Zhang. 2024.
+> **RulE: Knowledge Graph Reasoning with Rule Embedding.**
+> In *Findings of the Association for Computational Linguistics: ACL 2024*, pages 4316–4335.
+
+```bibtex
+@inproceedings{tang-etal-2024-rule,
+    title     = "{R}ul{E}: Knowledge Graph Reasoning with Rule Embedding",
+    author    = "Tang, Xiaojuan and Zhu, Song-Chun and Liang, Yitao and Zhang, Muhan",
+    booktitle = "Findings of the Association for Computational Linguistics: ACL 2024",
+    month     = aug,
+    year      = "2024",
+    publisher = "Association for Computational Linguistics",
+    pages     = "4316--4335",
+    url       = "https://aclanthology.org/2024.findings-acl.256/",
+}
