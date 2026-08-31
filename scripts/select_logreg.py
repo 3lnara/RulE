@@ -1,50 +1,17 @@
 #!/usr/bin/env python3
-"""
-Offline (L2 x alpha) sweep + model selection for the logistic-regression
-aggregator, combined with the frozen KGE score.
+"""Offline (L2 x alpha) sweep + two-stage model selection for the logreg
+aggregator fused with the frozen KGE score.
 
-Everything is offline tensor arithmetic -- no grounding, no model. Inputs:
-  rule_logreg.pt   beta_grid [G, R] + l2_grid [G]   (scripts/rule_logreg_train.py --l2_grid)
-  counts_<split>.pt  per-(query, rule, entity) firing (scripts/dump_rule_counts.py)
-  kge_<split>.pt     per-query KGE score [Q, N]       (scripts/dump_rule_counts.py --dump_kge)
+Pure tensor arithmetic over rule_logreg.pt (beta_grid + l2_grid), counts_<split>.pt
+and kge_<split>.pt; the combined score is
+`sum_R beta_g[R] * 1[rule fired] + alpha * kge`, ranked with the same filtered L/H
+expectation as the rest of the repo. Writes
+logreg_alpha_sweep_<split>.csv and logreg_selection.json.
 
-For every rule-weight vector beta_g (one per L2) and every alpha the combined
-per-query score is
-
-    score(t) = sum_R beta_g[R] * 1[rule R fired h->t]  +  alpha * kge(h, r, t)
-
-i.e. the in-model logreg-binary rule score (alpha=0 reproduces it exactly) fused
-with the KGE score, matching trainer.evaluate's `logits + alpha * kge_score` and
-evaluate_unified.py. Ranking is the identical filtered L/H expectation used
-everywhere else in this repo (score_counts_offline.expectation_metrics).
-
-SELECTION (two stages, both on the validation split):
-  Stage 1  L2    is chosen on RULE-ONLY validation MRR (alpha=0). L2 regularises
-                 the rule aggregator, so it is selected on how well the rules
-                 alone rank, with KGE out of the loop.
-  Stage 2  alpha is chosen on the COMBINED (rule + alpha*KGE) validation MRR at
-                 the L2 fixed in stage 1. alpha is purely the KGE-fusion weight.
-Test metrics are then reported once at exactly that (L2, alpha). Both the full
-grid and the selection are written out.
-
-Outputs (in --out_dir, default = --analysis_dir):
-  logreg_alpha_sweep_<split>.csv   the evaluated (l2, alpha) cells: MRR/Hit@/MR/n
-                                   (only the cells selection consults, unless
-                                   --full_grid dumps the complete table)
-  logreg_selection.json            selected (l2, alpha) + valid/test metrics
-
-By default only the cells the two-stage selection needs are evaluated
-(alpha=0 column for the L2 stage, then all alphas at the selected L2, then the
-selected cell on the report split) -- roughly (G + A) evaluations instead of
-G*A, which matters on WN18RR/FB15k. Pass --full_grid for the complete table.
-
-Usage (from repo root):
-    python scripts/select_logreg.py \\
-        --logreg_file  outputs/additive_umls_aggregation_2x2/logreg/rule_logreg.pt \\
-        --analysis_dir outputs/additive_umls_aggregation_2x2/analysis \\
-        --data_path    data/umls \\
-        --alpha_grid   0 0.5 1 2 3 5 \\
-        --splits       valid test
+Usage:
+    python scripts/select_logreg.py --logreg_file outputs/<ds>/rq/rule_logreg.pt \\
+        --analysis_dir outputs/<ds>/rq --data_path data/<ds> \\
+        --alpha_grid 0 0.5 1 2 3 5 --splits valid test
 """
 
 import argparse
@@ -68,18 +35,9 @@ _load_sizes         = _sco._load_entity_rel_sizes
 
 
 def eval_g(counts, kge, w_R, alpha_items, hr2ooo, N):
-    """Rank every query for one rule-weight vector w_R across several alphas.
-
-    alpha_items : list of (ai, alpha). The rule score (and the per-query filter)
-    are computed ONCE per query and reused across every requested alpha -- the
-    rule part does not depend on alpha, so this avoids rescattering it A times.
-
-    Returns {ai: metrics_dict}. Rule score uses BINARY activation (one
-    contribution per fired rule), exactly like --logreg_binary /
-    --precision_binary. Ungrounded entities get rule score 0 and still compete
-    (mask is effectively all-ones in simple aggregation), so gold always gets a
-    real rank. Combined score for alpha is  rule(w_R) + alpha * kge.
-    """
+    """Rank every query for one weight vector w_R across alpha_items = [(ai, alpha)],
+    combined score rule(w_R) + alpha*kge (binary activation, like --logreg_binary).
+    Returns {ai: metrics_dict}."""
     query_h    = counts["query_h"]
     query_r    = counts["query_r"]
     query_gold = counts["query_gold"]
@@ -248,15 +206,9 @@ def main():
         print(f"  [{split}] L2={l2_grid[gi]:<8g} alpha={float(alphas[ai]):<5g} "
               f"MRR={m['MRR']:.6f}")
 
-    # Two-stage selection, both on select_split, reported on report_split.
-    #   Stage 1: L2  is chosen on RULE-ONLY MRR (alpha=0) -- L2 regularises the
-    #            rule aggregator, so it is picked on how well the rules alone
-    #            rank, with KGE out of the loop.
-    #   Stage 2: alpha is chosen on the COMBINED (rule + alpha*KGE) MRR at the
-    #            L2 fixed in stage 1 -- alpha is purely the fusion weight.
-    # By default only the cells those two stages consult are evaluated
-    # (alpha=0 column, then all alphas at the selected L2); --full_grid forces
-    # the whole L2 x alpha table on every split. Selection is identical either way.
+    # Two-stage selection on select_split: L2 on rule-only MRR (alpha=0), then
+    # alpha on combined MRR at that L2. Only the consulted cells are evaluated
+    # unless --full_grid.
     sel_split = args.select_split
     if sel_split not in cache:
         raise ValueError(f"--select_split {sel_split} not in --splits {args.splits}")
@@ -353,13 +305,8 @@ def main():
             w.writerows(rows[split])
         print(f"Wrote {path}  ({len(rows[split])} rows)")
 
-    # Selected-L2 weight file: the SINGLE beta the pipeline commits to, in the
-    # exact schema src_additive/main.py --logreg_binary loads ('beta' [R] +
-    # scalar 'intercept'). Re-dumping in-model ranks with THIS file (slurm step 4)
-    # yields ranks_<split>.csv whose recomputed MRR matches the rule-only number
-    # reported here -- so the headline metric always corresponds to a real,
-    # reproducible in-model dump (this is the fix for the old primary-vs-selected
-    # L2 mismatch, where ranks_*.csv were frozen at L2=1e-4 regardless of choice).
+    # Selected-L2 weight file: the single beta the pipeline commits to, in the
+    # schema src_additive/main.py --logreg_binary loads ('beta' [R] + 'intercept').
     sel_pt = os.path.join(out_dir, "rule_logreg_selected.pt")
     torch.save({
         "beta":      beta_grid[gi_best].clone(),                       # [R] float32

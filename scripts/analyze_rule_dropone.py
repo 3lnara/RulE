@@ -1,36 +1,14 @@
 #!/usr/bin/env python3
-"""
-Drop-one-rule marginal importance (delta-MRR) for the logreg aggregator.
+"""Drop-one-rule marginal importance (delta-MRR) for the logreg aggregator.
 
-For each rule R, recompute validation MRR with R's contribution removed and
-report the change. This is the importance measure that is ROBUST TO COLLINEARITY:
-dropping one of two near-duplicate rules barely moves MRR (the other still fires),
-so it correctly signals LOW marginal importance even when |beta_R| is large --
-exactly where reading beta alone would mislead.
+Pure offline
+arithmetic over the dumped counts + selected beta; scoring matches
+score_counts_offline / trainer.evaluate. Sign: importance = MRR_baseline -
+MRR_without_R (positive => R helps).
 
-Uses the pre-dumped counts (scripts/dump_rule_counts.py) + the selected beta;
-pure offline arithmetic, no grounding/model. Scoring matches the repo's binary
-in-model aggregator and the filtered [L, H) expectation metric
-(score_counts_offline / trainer.evaluate). Baseline MRR is printed and should
-match `valid_rule_only_MRR` in logreg_selection.json.
-
-Rank update is exact but cheap: dropping R only shifts entities where R fired, so
-the new gold rank is a searchsorted over the query's competitor scores plus a
-correction on R's fired entities -- not a full re-rank per rule.
-
-Sign convention:
-  delta_mrr  = MRR_without_R - MRR_baseline   (negative => R HELPS)
-  importance = -delta_mrr = MRR_baseline - MRR_without_R  (positive => R helps)
-
-Outputs (in --out_dir, default = --logreg_dir):
-  rule_dropone_<split>.csv   per-rule: beta, support, n_queries_fired,
-                             delta_mrr, importance
-
-Usage (from repo root):
-    python scripts/analyze_rule_dropone.py \\
-        --logreg_dir   outputs/additive_family/logreg-family \\
-        --analysis_dir outputs/additive_family/analysis \\
-        --data_path    data/family --split valid
+Usage:
+    python scripts/analyze_rule_dropone.py --logreg_dir outputs/<ds>/rq \\
+        --analysis_dir outputs/<ds>/rq --data_path data/<ds> --split valid
 """
 
 import argparse

@@ -1,37 +1,11 @@
 #!/usr/bin/env python3
-"""
-Per-head-relation collinearity report for the logistic-regression aggregator.
+"""Per-head-relation collinearity report for the logreg aggregator.
 
-Reads the cached design matrix (scripts/build_design_matrix_cache.py). Because
-rule features are BINARY firing indicators and the design is block-diagonal by
-head relation (a row of relation r only has nonzeros in rules whose head is r),
-collinearity can only occur WITHIN a head relation -- so every pairwise measure
-is restricted to same-head-relation rules, and cross-relation pairs (structurally
-Jaccard 0) are never considered.
+Reads design_matrix.pt from --logreg_dir and writes rule_jaccard_pairs.csv and
+rule_collinearity.csv (the latter feeds build_rule_trust_table.py).
 
-Measures, per head relation:
-  * Pairwise JACCARD between rule firing sets: J(i,j) = |A_i & A_j| / |A_i | A_j|,
-    computed from the Gram matrix G = X_r^T X_r (G[i,j] = co-fire count,
-    G[i,i] = support). High J => near-duplicate columns => the fit can only
-    identify the SUM of their effect, not the split.
-  * EXACT duplicates: J == 1 (identical firing sets) -> literally non-identifiable
-    columns; their betas are arbitrary up to a sum constraint.
-  * CONDITION NUMBER of the binary correlation (phi) matrix, and numerical
-    RANK DEFICIENCY -- the multi-way collinearity that pairwise Jaccard misses.
-
-Outputs (in --out_dir, default = --logreg_dir):
-  collinearity_by_relation.csv   one row per head relation (with support>0 rules)
-  rule_jaccard_pairs.csv         flagged pairs with J >= --jaccard_thr (+ betas)
-  rule_collinearity.csv          per-rule: max_jaccard, argmax partner,
-                                 n_high_partners, dup_group_id, vif (feeds the
-                                 trust table). vif = diagonal of the inverse phi
-                                 (binary correlation) matrix within the head
-                                 relation -- the multi-way collinearity that
-                                 pairwise Jaccard misses; exact duplicates -> inf.
-
-Usage (from repo root):
-    python scripts/analyze_rule_collinearity.py \\
-        --logreg_dir outputs/additive_family/logreg-family
+Usage:
+    python scripts/analyze_rule_collinearity.py --logreg_dir outputs/<ds>/rq
 """
 
 import argparse
@@ -54,12 +28,8 @@ def parse_args():
                    help="Report pairs with Jaccard >= this (default 0.8).")
     p.add_argument("--dup_thr", type=float, default=0.999,
                    help="Jaccard >= this counts as an exact duplicate (default 0.999).")
-    p.add_argument("--rank_tol", type=float, default=1e-8,
-                   help="Eigenvalue/max-eigenvalue ratio below which a correlation "
-                        "direction is treated as rank-deficient.")
     p.add_argument("--max_k_eig", type=int, default=4000,
-                   help="Skip the (dense) condition-number/eig for relations with "
-                        "more than this many support>0 rules.")
+                   help="Skip the dense VIF for relations with more than this many support>0 rules.")
     return p.parse_args()
 
 
@@ -103,7 +73,6 @@ def main():
         if support[r] > 0:
             rel2rules.setdefault(int(head[r]), []).append(r)
 
-    rel_csv  = os.path.join(out_dir, "collinearity_by_relation.csv")
     pair_csv = os.path.join(out_dir, "rule_jaccard_pairs.csv")
     rule_csv = os.path.join(out_dir, "rule_collinearity.csv")
 
@@ -116,16 +85,14 @@ def main():
     next_group = 0
 
     pair_rows = []
-    rel_rows  = []
+    n_rel_analyzed = 0
 
     for rel in sorted(rel2rules):
         rl = rel2rules[rel]
         k = len(rl)
+        n_rel_analyzed += 1
         if k == 1:
             vif[rl[0]] = 1.0   # lone column in its relation -> no collinearity
-            rel_rows.append(dict(head=rel, n_rules=1, n_pairs_high=0, n_exact_dup=0,
-                                 max_jaccard=0.0, median_offdiag_jaccard=0.0,
-                                 cond_number="", rank_deficiency=""))
             continue
 
         local = {g: i for i, g in enumerate(rl)}
@@ -145,14 +112,10 @@ def main():
             J = np.where(union > 0, G / union, 0.0)
         np.fill_diagonal(J, 0.0)
 
-        # Per-pair flags.
+        # Flagged pairs.
         iu, ju = np.triu_indices(k, k=1)
         Jv = J[iu, ju]
         high = Jv >= args.jaccard_thr
-        n_pairs_high = int(high.sum())
-        n_exact_dup_pairs = int((Jv >= args.dup_thr).sum())
-        median_off = float(np.median(Jv)) if Jv.size else 0.0
-        max_jac_rel = float(Jv.max()) if Jv.size else 0.0
 
         for idx in np.nonzero(high)[0]:
             gi, gj = rl[iu[idx]], rl[ju[idx]]
@@ -187,8 +150,7 @@ def main():
                     dup_group[rl[u]] = next_group
                 next_group += 1
 
-        # Condition number + rank deficiency of the phi (binary correlation) matrix.
-        cond_s, rankdef_s = "", ""
+        # Per-rule VIF from the phi (binary correlation) matrix.
         if k <= args.max_k_eig:
             mean = a / M
             std = np.sqrt(np.clip(mean * (1 - mean), 1e-12, None))
@@ -196,37 +158,15 @@ def main():
             C = cov / (std[:, None] * std[None, :])
             C = np.clip(C, -1.0, 1.0)
             np.fill_diagonal(C, 1.0)
-            ev = np.linalg.eigvalsh(C)
-            ev = np.clip(ev, 0.0, None)
-            emax = float(ev.max())
-            emin = float(ev.min())
-            cond_s = f"{(emax / emin):.3e}" if emin > 0 else "inf"
-            rankdef_s = str(int((ev < args.rank_tol * emax).sum()))
 
-            # VIF_i = (C^{-1})_{ii}: variance inflation from regressing rule i on
-            # every OTHER rule in the relation (the multi-way analogue of Jaccard).
-            # Exact-duplicate columns make C singular -> their true VIF is inf;
-            # use the pseudo-inverse for the rest and stamp dup members as inf.
+            # VIF_i = (C^{-1})_{ii}. Duplicate columns make C singular (true VIF
+            # inf): pinv for the rest, dup members stamped inf.
             try:
                 vdiag = np.diag(np.linalg.inv(C))
             except np.linalg.LinAlgError:
                 vdiag = np.diag(np.linalg.pinv(C))
             for i, g in enumerate(rl):
                 vif[g] = np.inf if dup_group[g] >= 0 else max(float(vdiag[i]), 1.0)
-
-        rel_rows.append(dict(
-            head=rel, n_rules=k, n_pairs_high=n_pairs_high,
-            n_exact_dup=n_exact_dup_pairs, max_jaccard=f"{max_jac_rel:.4f}",
-            median_offdiag_jaccard=f"{median_off:.4f}",
-            cond_number=cond_s, rank_deficiency=rankdef_s))
-
-    # ---- Write outputs ------------------------------------------------------
-    with open(rel_csv, "w", newline="") as fh:
-        w = csv.DictWriter(fh, fieldnames=["head", "n_rules", "n_pairs_high",
-                                           "n_exact_dup", "max_jaccard",
-                                           "median_offdiag_jaccard", "cond_number",
-                                           "rank_deficiency"])
-        w.writeheader(); w.writerows(rel_rows)
 
     with open(pair_csv, "w", newline="") as fh:
         w = csv.DictWriter(fh, fieldnames=["head", "rule_i", "rule_j", "jaccard",
@@ -253,11 +193,11 @@ def main():
                 vif=vif_s))
 
     n_dup_rules = int((dup_group >= 0).sum())
-    print(f"relations analyzed : {len(rel_rows)}")
+    print(f"relations analyzed : {n_rel_analyzed}")
     print(f"flagged pairs (J>={args.jaccard_thr}) : {len(pair_rows)}")
     print(f"rules in exact-dup groups (J>={args.dup_thr}) : {n_dup_rules} "
           f"in {next_group} groups")
-    print(f"Wrote:\n  {rel_csv}\n  {pair_csv}\n  {rule_csv}")
+    print(f"Wrote:\n  {pair_csv}\n  {rule_csv}")
 
 
 if __name__ == "__main__":

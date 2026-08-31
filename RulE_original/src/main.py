@@ -87,19 +87,9 @@ def parse_args(args=None):
 
     
     parser.add_argument('--skip_pretrain', action='store_true', default=False,
-                        help='Skip pre-training and load from an existing checkpoint')
+                        help='Load an existing pre-train checkpoint instead of pre-training')
     parser.add_argument('--pretrain_checkpoint', type=str, default=None,
-                        help='Path to pre-trained checkpoint (used with --skip_pretrain)')
-
-    # === Eval-only rank dump (reuse a trained grounding.pt, no retraining) ===
-    parser.add_argument('--eval_only', action='store_true', default=False,
-                        help='Skip grounding training; load --grounding_checkpoint and '
-                             'evaluate valid/test only. Implies --skip_pretrain.')
-    parser.add_argument('--grounding_checkpoint', type=str, default=None,
-                        help='Path to a trained grounding.pt to load for --eval_only.')
-    parser.add_argument('--dump_ranks', action='store_true', default=False,
-                        help='Write per-query filtered ranks (h, r, t, L, H) to '
-                             'ranks_mlp_<split>.csv in --save_path during evaluation.')
+                        help='Pre-train checkpoint path (with --skip_pretrain)')
     return parser.parse_args(args)
 
 def main():
@@ -108,9 +98,6 @@ def main():
     skip_pretrain = args.skip_pretrain
     pretrain_checkpoint = args.pretrain_checkpoint
     cli_save_path = args.save_path
-    cli_eval_only = args.eval_only
-    cli_grounding_checkpoint = args.grounding_checkpoint
-    cli_dump_ranks = args.dump_ranks
 
     # read the given config
     if args.init_checkpoint_config:
@@ -119,12 +106,6 @@ def main():
 
     args.skip_pretrain = skip_pretrain
     args.pretrain_checkpoint = pretrain_checkpoint
-    args.eval_only = cli_eval_only
-    args.grounding_checkpoint = cli_grounding_checkpoint
-    args.dump_ranks = cli_dump_ranks
-    # --eval_only loads a trained grounding.pt and never pre-trains.
-    if cli_eval_only:
-        args.skip_pretrain = True
     if cli_save_path is not None:
         args.save_path = cli_save_path
 
@@ -195,32 +176,15 @@ def main():
         torch.cuda.empty_cache()
     print("loading RulE trainer......")
 
-    # In --eval_only mode the full trained grounding.pt (which already contains
-    # KGE/rule embeddings + the MLP head) is loaded inside eval_and_dump, so the
-    # pre-train checkpoint load is skipped here.
-    if not getattr(args, 'eval_only', False):
-        if args.pretrain_checkpoint:
-            checkpoint_path = args.pretrain_checkpoint
-        else:
-            checkpoint_path = os.path.join(args.save_path, 'checkpoint')
+    if args.pretrain_checkpoint:
+        checkpoint_path = args.pretrain_checkpoint
+    else:
+        checkpoint_path = os.path.join(args.save_path, 'checkpoint')
 
-        # load rule embedding and KGE embedding
-
-        checkpoint = torch.load(checkpoint_path, map_location=device)
-        RulE_model.load_state_dict(checkpoint['model'], strict=False)
-
-
-        logging.info('Loaded pre-trained checkpoint from %s' % checkpoint_path)
-
-    # logging.info('Test the results of pre-training')
-    
-    # valid_mrr = pre_trainer.evaluate('valid', expectation=True)
-    # test_mrr = pre_trainer.evaluate('test', expectation=True)
-
-    # RulE_model.add_param()
-
-    # checkpoint = torch.load(os.path.join(args.save_path, 'grounding.pt'))
-    # RulE_model.load_state_dict(checkpoint['model'])
+    # load rule and KGE embeddings
+    checkpoint = torch.load(checkpoint_path, map_location=device)
+    RulE_model.load_state_dict(checkpoint['model'], strict=False)
+    logging.info('Loaded pre-trained checkpoint from %s' % checkpoint_path)
 
     ground_trainer = GroundTrainer(
         model=RulE_model,
@@ -233,17 +197,7 @@ def main():
         num_worker=args.cpu_num
     )
 
-    # valid_mrr = ground_trainer.evaluate('valid', expectation=True)
-    # test_mrr = ground_trainer.evaluate('test', expectation=True)
-    
-    # args.g_batch_size = 32
-
-    if getattr(args, 'eval_only', False):
-        ground_trainer.eval_and_dump(args)
-    else:
-        ground_trainer.train(args)
-    
-    # return test_mrr
+    ground_trainer.train(args)
 
 
 if __name__ == '__main__':

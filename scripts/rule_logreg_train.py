@@ -1,82 +1,15 @@
 #!/usr/bin/env python3
-"""
-Fit an interpretable per-rule LOGISTIC-REGRESSION aggregator for RulE.
+"""Fit an interpretable per-rule additive aggregator (one weight beta_R per rule
+plus one shared intercept) for RulE.
 
-For every rule R (head relation r, body path B) we learn ONE weight beta_R,
-plus ONE shared intercept b, by binary cross-entropy on a leave-one-out (LOO)
-train design matrix. This is the learned counterpart of the frozen
-precision_binary baseline: same in-model score form
+Writes
+rule_logreg.pt (beta per rule_id, aligned to rule_features[:, 0]) and
+rule_logreg_train.csv; --design_cache also caches the firing matrix.
 
-    score(t) = sum_R beta_R * 1[rule R fired h->t]   (+ b, constant per query)
-
-but with beta_R fitted to the data instead of set to the rule's empirical PCA
-precision (or the frozen RulE embedding confidence).
-
---------------------------------------------------------------------------------
-Design matrix (leave-one-out)
---------------------------------------------------------------------------------
-Rows are candidate (h, t) pairs, one row per pair for which >=1 rule of the head
-relation r fires. Columns are rules. Entries are binary firing indicators:
-
-    x[(h,t), R] = 1[body of R grounds h -> t]
-
-Label y[(h,t)] = 1 iff t is a true train tail of (h, r), else 0.
-
-LEAVE-ONE-OUT (edge-specific): a positive (h, t) is grounded with exactly the
-one answer edge (h, r, t) removed -- the same edges_to_remove semantics
-src_additive/data.py uses during training -- so the trivial "length-1 rule =
-the head relation" cannot reuse its own answer, while legitimate multi-hop paths
-that merely start with a DIFFERENT r-edge out of h (e.g. transitivity
-r(x,y)&r(y,z)->r(x,z)) are preserved. Negatives use plain full-graph grounding
-(their own edge does not exist, so there is nothing to leave out). This is the
-intended difference from the precision baseline, which grounds on the full train
-graph with no leave-one-out.
-
-Only fired (h,t) pairs are rows: entities no body path can reach are never
-scored at eval time, so they carry no signal and are excluded, exactly matching
-the in-model behaviour. A gold pair reachable only via its own edge therefore
-drops out under leave-one-out, exactly as it is unrankable at eval time.
-
---------------------------------------------------------------------------------
-Fit
---------------------------------------------------------------------------------
-    logits = X @ beta + b
-    loss   = data_loss(logits, y) [+ optional pos_weight]
-             + l2 * ||beta||^2
-
-data_loss is one of BCE (logistic regression), MSE (OLS), or squared hinge
-(linear SVM), selected by --loss; see fit_logreg's docstring. All three share the
-identical in-model score form, so nothing downstream changes: the fitted beta is
-swept and selected by scripts/select_logreg.py exactly the same way, and
---logreg_binary loads it unchanged. Rules that never fire get beta_R = 0 (no rows
-reference them), and contribute nothing at eval -- matching precision_binary's
-nan->0 handling.
-
-The intercept b is learned (it matters for the BCE fit / calibration) but is a
-CONSTANT added to every candidate tail within a query, so it does NOT change the
-per-query ranking. In-model evaluation therefore matches precision_binary
-exactly (binary activation, no per-entity bias, per-rule weights); the aggregator
-just supplies learned beta_R in place of frozen precision.
-
---------------------------------------------------------------------------------
-Outputs (all written to --out_dir)
---------------------------------------------------------------------------------
-  rule_logreg.pt         tensors indexed by rule_id:
-                           beta, support, gold_fired, head, length
-                         plus scalar `intercept` and a `meta` dict.
-  rule_logreg_train.csv  per-rule table (one row per rule)
-
-Alignment note: rule_id == position in load_rules() output == rule_features[:, 0]
-in the model, so beta[rule_id] lines up with the model's rule rows exactly the
-way rule_precision.pt's `precision` does. Load it in-model via
-    src_additive/main.py --logreg_binary --logreg_file <out_dir>/rule_logreg.pt
-
-Usage (from repo root):
-    python scripts/rule_logreg_train.py \\
-        --data_path data/umls \\
-        --rule_file data/umls/mined_rules.txt \\
-        --out_dir   outputs/additive_umls_aggregation_2x2/logreg \\
-        --device    cuda
+Usage:
+    python scripts/rule_logreg_train.py --data_path data/<ds> \\
+        --rule_file data/<ds>/mined_rules.txt --out_dir outputs/<ds>/rq \\
+        --loss bce --l2_grid 1e-8 ... 1 --design_cache outputs/<ds>/rq/design_matrix.pt
 """
 
 import argparse
@@ -107,11 +40,7 @@ load_rules   = _drc.load_rules
 # ---------------------------------------------------------------------------
 
 def build_gold(graph: MinimalGraph) -> dict:
-    """gold[r][h] = set of true train tails for directed relation r, head h.
-
-    graph.train_facts already includes both forward (h, r, t) and inverse
-    (t, r+NR, h) triples, so this covers all directed relations uniformly.
-    """
+    """gold[r][h] = set of true train tails (train_facts already has both directions)."""
     gold: dict = defaultdict(lambda: defaultdict(set))
     for h, r, t in graph.train_facts:
         gold[r][h].add(t)
@@ -131,19 +60,9 @@ def ground(
     r_query: int = None,            # query relation (only used with drop_dst)
     drop_dst: torch.Tensor = None,  # [B] held-out answer tail per column, or None
 ) -> torch.Tensor:
-    """Ground rule body `r_body` from each head. Returns [B, N] int64 counts.
-
-    If `drop_dst` is given, apply EDGE-SPECIFIC leave-one-out: at every hop that
-    traverses the query relation r_query, only the single edge
-    (heads[b], r_query, drop_dst[b]) is zeroed for column b. This removes just
-    that column's held-out answer edge -- the exact semantics of
-    src_additive/data.py's grounding (edges_to_remove) during training -- so a
-    body path that merely begins by taking a DIFFERENT r_query edge out of the
-    head (e.g. transitivity r(x,y)&r(y,z)->r(x,z)) is preserved.
-
-    With drop_dst=None this is a plain full-graph grounding (no removal),
-    matching MinimalGraph.grounding.
-    """
+    """Ground rule body `r_body` from each head -> [B, N] int64 counts. With
+    `drop_dst`, apply edge-specific leave-one-out on (heads[b], r_query, drop_dst[b])
+    per column (matches data.py's edges_to_remove); drop_dst=None is full-graph."""
     N = graph.entity_size
     B = heads.size(0)
     x = torch.zeros(N, B, dtype=torch.long, device=device)
@@ -186,25 +105,10 @@ def build_design_matrix(
     device: torch.device,
     chunk_size: int = 0,
 ):
-    """Build the leave-one-out binary design matrix.
-
-    Rows are candidate (h, t) pairs; columns are rules; entries are binary rule
-    firings x[(h,t), R] = 1[body of R grounds h->t]. Label y = 1[t is a true
-    train tail of (h, r)]. Built in two passes per head relation r:
-
-      PASS A (negatives): plain full-graph grounding from each known head. Every
-        fired (h, t') pair with t' NOT a gold tail is a negative row (label 0).
-        Deduplicated by head, so each (h, t') appears once.
-
-      PASS B (positives): for each gold fact (h, r, t), ground with EDGE-SPECIFIC
-        leave-one-out removing exactly (h, r, t). If >=1 rule still fires h->t,
-        (h, t) is a positive row (label 1) with that leave-one-out firing. Gold
-        pairs no rule can reach without their own edge are dropped (they are
-        unrankable at eval time too), so the trivial identity rule (body = the
-        head relation) correctly contributes nothing.
-
-    Returns rows, cols, y, fired_total, gold_fired, M (see fit_logreg).
-    """
+    """Build the LOO binary design matrix (rows = fired (h,t) pairs, cols = rules,
+    y = 1[t is a true train tail]). Two passes per head relation: negatives from
+    full-graph grounding, positives from leave-one-out grounding. Returns
+    rows, cols, y, fired_total, gold_fired, M."""
     R = len(rules)
     fired_total = np.zeros(R, dtype=np.int64)   # rows (pos+neg) each rule fires in
     gold_fired  = np.zeros(R, dtype=np.int64)   # positive rows each rule fires in
@@ -222,13 +126,7 @@ def build_design_matrix(
     row_offset = 0
 
     def _emit_rows(fired_list, keep_mask, bt_index, labels):
-        """Append COO entries for the rows selected by keep_mask.
-
-        fired_list : list of (gid, fired[Bk, N] bool)
-        keep_mask  : [Bk, N] bool  -- which (i_head, t) cells become rows
-        bt_index   : [M_i, 2] nonzero indices of keep_mask (i_head, t)
-        labels     : [M_i] float row labels
-        """
+        """Append COO entries for the (i_head, t) cells selected by keep_mask."""
         nonlocal row_offset
         M_i = bt_index.size(0)
         if M_i == 0:
@@ -342,32 +240,11 @@ def fit_logreg(
     grad_tol: float = 1e-4,
     loss: str = "bce",
 ):
-    """Fit a linear-additive aggregator  score = X @ beta + b  by L-BFGS, with an
-    L2 (ridge) penalty and one of three convex, smooth losses. Returns (beta[R], b).
-
-        loss='bce'           binary cross-entropy       -> LOGISTIC REGRESSION
-                             (BCEWithLogitsLoss); beta = log-odds contribution,
-                             score = logit of P(fact true), calibrated.
-        loss='mse'           squared error to {0,1}      -> LINEAR / RIDGE (OLS)
-                             (the linear probability model); beta = additive
-                             change in a [0,1]-ish score (NOT a probability).
-        loss='squared_hinge' squared hinge, labels +/-1  -> LINEAR SVM
-                             mean max(0, 1 - s*score)^2, s = 2y-1; beta = margin
-                             coefficients, score = signed distance (NOT a prob).
-
-    All three share the SAME additive score form, so in-model --logreg_binary and
-    the offline selection/parity stack treat them identically -- this is exactly
-    the OLS/SVM-vs-logreg comparison: same design matrix, same L2 grid, same
-    ranking machinery, only the loss (hence the MEANING of beta) differs.
-
-    Prints a convergence certificate. Each objective is convex + C^1 (the square
-    on the hinge smooths its kink), so the optimum is unique and characterised by
-    a ZERO gradient:
-      * ||grad||_inf ~ 0  => global penalised optimum reached (grad_tol threshold).
-      * iters < max_iter   => L-BFGS stopped on its own tolerance, not the cap.
-    Plus coefficient-stability signals (||beta||_2, max|beta|); convex + zero-init
-    + deterministic => a re-run gives identical beta.
-    """
+    """Fit score = X @ beta + b by L-BFGS with an L2 penalty; returns (beta[R], b).
+    loss selects bce (logistic regression), mse (OLS / linear probability model) or
+    squared_hinge (linear SVM) -- same additive score form, only the meaning of
+    beta differs. Convex + zero-init + deterministic, so re-runs are identical;
+    prints a convergence certificate."""
     if M == 0:
         print("  WARNING: empty design matrix; returning zero weights.")
         return torch.zeros(R), torch.zeros(())
@@ -430,10 +307,7 @@ def fit_logreg(
 
     with torch.no_grad():
         logits = torch.sparse.mm(X, beta).squeeze(1) + b
-        # Decision threshold + per-class score summary depend on the loss: BCE
-        # thresholds logits at 0 (prob 0.5) and summarises sigmoid probs; MSE
-        # thresholds the [0,1] target at 0.5 and summarises the raw prediction;
-        # hinge thresholds the decision value at 0 and summarises it.
+        # Decision threshold + score summary depend on the loss.
         if loss == "mse":
             pred = (logits > 0.5).float(); summ = logits; slabel = "mean_pred"
         elif loss == "squared_hinge":
@@ -582,10 +456,8 @@ def main():
     total_known = sum(len(v) for v in gold.values())
     print(f"  unique (r, h) pairs with >=1 gold tail: {total_known}")
 
-    # ---- Design matrix: load from cache or build (grounding) -----------------
-    # The LOO firing matrix is deterministic given (data, rules), so a cache is an
-    # exact stand-in for re-grounding. This makes an L2 grid EXTENSION cheap:
-    # ground once, then every re-sweep is pure-CPU refits.
+    # Design matrix: load from cache or build by grounding. The LOO firing matrix
+    # is deterministic given (data, rules), so the cache is an exact stand-in.
     cache_path = args.design_cache
     if cache_path and os.path.isfile(cache_path):
         print(f"\nLoading cached design matrix from {cache_path} (skipping grounding)...")
@@ -620,11 +492,8 @@ def main():
             }, cache_path)
             print(f"  cached design matrix -> {cache_path} (re-sweeps now skip grounding)")
 
-    # ---- Fit logistic regression (single L2 or a log grid) --------------------
-    # The design matrix is built once above; each L2 is a cheap refit. The
-    # primary --l2 is always included so `beta` (loaded by --logreg_binary)
-    # stays well defined. beta_grid rows line up with l2_grid for the offline
-    # alpha/L2 selection in scripts/select_logreg.py.
+    # Fit over a single L2 or a log grid (cheap refits on the cached matrix).
+    # The primary --l2 is always included; beta_grid rows align with l2_grid.
     pw = (args.pos_weight if args.pos_weight > 0 else None)
     primary = args.l2
     grid    = args.l2_grid

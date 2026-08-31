@@ -41,7 +41,7 @@ def parse_args(args=None):
     parser.add_argument('-cpu', '--cpu_num', default=10, type=int)
 
     parser.add_argument('--seed', default=-1, type=int,
-                        help='Random seed. -1 (default) means use the value from the JSON config.')
+                        help='Random seed; -1 uses the config value')
     
     # pre train process (KGE + rulE)
     parser.add_argument('-b', '--batch_size', default=256, type=int)
@@ -75,7 +75,9 @@ def parse_args(args=None):
 
     # grounding training process
     parser.add_argument('--mlp_rule_dim', default=100, type=int)
-    parser.add_argument('--alpha', default=5.0, type=int, help='weight the KGE score')
+    parser.add_argument('--alpha', default=None, type=float,
+                        help='KGE-fusion weight for the test_kge eval; '
+                             'default None uses the config alpha (else 5.0)')
     parser.add_argument('--smoothing', default=0.5, type=float)
     parser.add_argument('--batch_per_epoch', default=1000000, type=int)
     parser.add_argument('--print_every', default=1000, type=int)
@@ -85,63 +87,29 @@ def parse_args(args=None):
     parser.add_argument('--num_iters', default=None, type=int)
 
     parser.add_argument('--skip_pretrain', action='store_true', default=False,
-                        help='Skip pre-training and load from an existing checkpoint')
+                        help='Load an existing pre-train checkpoint instead of pre-training')
     parser.add_argument('--pretrain_checkpoint', type=str, default=None,
-                        help='Path to pre-trained checkpoint (used with --skip_pretrain)')
+                        help='Pre-train checkpoint path (with --skip_pretrain)')
 
-    # === Interpretable additive aggregation (replaces the opaque MLP) ===
-    parser.add_argument('--simple_aggregation', action='store_true', default=False,
-                        help='Replace FuncToNodeSum + score_model (MLP) with a simple '
-                             'additive aggregation: score[t] = sum_R w_R * count_R[t] + bias. '
-                             'Each rule contributes independently, so contributions are '
-                             'directly attributable. Default off -> original MLP.')
-
-    # === Faithful paper "sum (w/o MLP)" ===
-    parser.add_argument('--paper_sum', action='store_true', default=False,
-                        help="Faithful reproduction of the paper's 'sum (w/o MLP)' baseline: "
-                             "binary activation (1 if rule fired, 0 otherwise), no per-entity "
-                             "bias, raw frozen RulE confidence as weights. Implies "
-                             "--simple_aggregation.")
+    # Interpretable additive aggregation (replaces the MLP grounding head)
+    parser.add_argument('--conf_count', action='store_true', default=False,
+                        help='Additive scorer: score[t] = sum_R w_R * count_R[t] + bias')
+    parser.add_argument('--conf_binary', action='store_true', default=False,
+                        help="Paper's 'sum (w/o MLP)': binary activation, no bias. Implies --conf_count")
     parser.add_argument('--no_bias', action='store_true', default=False,
-                        help='Drop the per-entity bias from --simple_aggregation so the '
-                             'score is purely Sum_R w_R * count_R[t] (raw counts, no '
-                             'popularity prior). Implies --simple_aggregation. The bias is '
-                             'frozen, so this mode has no trainable parameters (fixed scorer).')
+                        help='Drop the per-entity bias. Implies --conf_count')
     parser.add_argument('--clamp_negative_confidence', action='store_true', default=False,
-                        help='Clamp frozen per-rule RulE confidences to >=0 '
-                             '(w_R = max(0, w_R)) before additive aggregation, zeroing out '
-                             'negative-confidence rules. Only affects '
-                             '--simple_aggregation / --paper_sum runs.')
-
-    # === Precision x binary aggregation ===
+                        help='Clamp per-rule confidences to >=0 before aggregation')
     parser.add_argument('--precision_binary', action='store_true', default=False,
-                        help='Weight rules by their empirical train PCA precision '
-                             '(from rule_precision.pt) instead of the frozen RulE '
-                             'confidence, with binary activation (1 if rule fired) and '
-                             'no per-entity bias. Implies --simple_aggregation. Use '
-                             '--precision_file to point at the rule_precision.pt to load.')
+                        help='Weight rules by train PCA precision, binary activation, no bias. Implies --conf_count')
     parser.add_argument('--precision_file', type=str, default=None,
-                        help='Path to rule_precision.pt (written by '
-                             'scripts/rule_precision_train.py). Required with '
-                             '--precision_binary.')
-
-    # === Learned per-rule logistic-regression aggregation ===
+                        help='Path to rule_precision.pt (required with --precision_binary)')
     parser.add_argument('--logreg_binary', action='store_true', default=False,
-                        help='Weight rules by the per-rule logistic-regression '
-                             'coefficients beta_R (from rule_logreg.pt) fitted by '
-                             'BCE on a leave-one-out train design matrix, with '
-                             'binary activation (1 if rule fired) and no per-entity '
-                             'bias. Same score form as --precision_binary but with '
-                             'LEARNED weights instead of frozen precision. Implies '
-                             '--simple_aggregation. Use --logreg_file to point at '
-                             'the rule_logreg.pt to load.')
+                        help='Weight rules by fitted logreg coefficients, binary activation, no bias. Implies --conf_count')
     parser.add_argument('--logreg_file', type=str, default=None,
-                        help='Path to rule_logreg.pt (written by '
-                             'scripts/rule_logreg_train.py). Required with '
-                             '--logreg_binary.')
+                        help='Path to rule_logreg.pt (required with --logreg_binary)')
     parser.add_argument('--dump_ranks', action='store_true', default=False,
-                        help='Write per-query filtered ranks (h, r, t, L, H) to '
-                             'ranks_<split>.csv in --save_path during evaluation.')
+                        help='Write per-query filtered ranks to ranks_<split>.csv in --save_path')
 
     return parser.parse_args(args)
 
@@ -151,8 +119,8 @@ def main():
     skip_pretrain = args.skip_pretrain
     pretrain_checkpoint = args.pretrain_checkpoint
     cli_save_path = args.save_path
-    cli_simple_aggregation = args.simple_aggregation
-    cli_paper_sum = args.paper_sum
+    cli_conf_count = args.conf_count
+    cli_conf_binary = args.conf_binary
     cli_no_bias = args.no_bias
     cli_clamp_negative_confidence = args.clamp_negative_confidence
     cli_precision_binary = args.precision_binary
@@ -160,9 +128,9 @@ def main():
     cli_logreg_binary = args.logreg_binary
     cli_logreg_file = args.logreg_file
     cli_dump_ranks = args.dump_ranks
-    cli_num_iters = args.num_iters  # None-sentinel below: argparse default is 20
-    # Sentinel: argparse default is -1 meaning "not provided, use config value".
-    cli_seed = args.seed if args.seed != -1 else None
+    cli_num_iters = args.num_iters
+    cli_alpha = args.alpha
+    cli_seed = args.seed if args.seed != -1 else None  # -1 = use config value
 
     # read the given config
     if args.init_checkpoint_config:
@@ -173,7 +141,7 @@ def main():
     args.pretrain_checkpoint = pretrain_checkpoint
     if cli_save_path is not None:
         args.save_path = cli_save_path
-    args.paper_sum = cli_paper_sum
+    args.conf_binary = cli_conf_binary
     args.no_bias = cli_no_bias
     args.clamp_negative_confidence = cli_clamp_negative_confidence
     args.precision_binary = cli_precision_binary
@@ -181,18 +149,20 @@ def main():
     args.logreg_binary = cli_logreg_binary
     args.logreg_file = cli_logreg_file
     args.dump_ranks = cli_dump_ranks
-    # --paper_sum, --no_bias, --precision_binary and --logreg_binary all force
-    # simple_aggregation
-    if cli_paper_sum or cli_no_bias or cli_precision_binary or cli_logreg_binary:
-        args.simple_aggregation = True
+    # --conf_binary / --no_bias / --precision_binary / --logreg_binary imply --conf_count
+    if cli_conf_binary or cli_no_bias or cli_precision_binary or cli_logreg_binary:
+        args.conf_count = True
     else:
-        args.simple_aggregation = cli_simple_aggregation
-    # CLI --num_iters overrides the JSON config value when explicitly provided.
+        args.conf_count = cli_conf_count
+    # CLI overrides the config value when provided
     if cli_num_iters is not None:
         args.num_iters = cli_num_iters
-    # CLI --seed overrides the JSON config value when explicitly provided.
     if cli_seed is not None:
         args.seed = cli_seed
+    if cli_alpha is not None:
+        args.alpha = cli_alpha
+    elif 'alpha' not in args:
+        args.alpha = 5.0
 
     # wandb.init(project='RulE',group='RotatE', name = args.save_path, config=args)
     if args.save_path is None:

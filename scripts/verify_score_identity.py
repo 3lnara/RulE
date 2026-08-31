@@ -1,40 +1,17 @@
 #!/usr/bin/env python3
-"""
-Assert the ATTRIBUTION identity that the interpretability claim rests on:
+"""Assert the attribution identity `score_model(t) == sum_R beta_R * 1[rule R
+fired h -> t]` that the interpretability claim rests on.
 
-    score_model(t)  ==  sum_R  beta_R * 1[rule R fired h -> t]
+Runs the real RulE.forward on the real KnowledgeGraph under
+the --logreg_binary flags (conf_count, conf_binary, use_bias=False) and compares
+the per-entity score against two independent reconstructions -- from the dumped
+counts CSR and from a fresh MinimalGraph grounding. beta is synthetic (dense,
+signed) by default as a stronger probe of the rule_id -> weight map; --logreg_file
+uses a fitted beta.
 
-verify_grounding_parity.py checks the FEATURES (the integer path counts) agree
-between the offline stack and the real KG. It says nothing about how
-model.forward aggregates them. This script closes that loop: it runs the REAL
-RulE.forward on the REAL KnowledgeGraph under the exact flags trainer.py sets
-for --logreg_binary (simple_aggregation, paper_sum, use_bias=False) and checks
-the returned per-entity score against two independent reconstructions:
-
-  REF-A  from the dumped counts_valid.pt CSR (the artifact the offline L2/alpha
-         sweep consumes), summing beta over rules with cnt > 0.
-  REF-B  from a fresh MinimalGraph grounding, independent of both the model and
-         the dump.
-
-If all three agree, then every ranked score is literally a sum of per-rule
-contributions, each contribution is beta_R, and the decomposition a reader sees
-is the decomposition the model used. That is the interpretability claim.
-
-The KGE checkpoint is NOT needed: under these flags the entity/relation
-embeddings never enter the score. beta is therefore synthetic by default (dense,
-signed, no ties), which is a STRICTLY stronger probe than a real beta -- a
-sparse or all-positive vector can mask an off-by-one in the rule_id -> weight
-map. Pass --logreg_file to use a fitted beta instead.
-
-Also checked:
-  * rank invariance to the intercept (b is a per-query constant, so omitting it
-    cannot change the ranking -- this is why use_bias=False is safe).
-  * attribution completeness: for the gold tail, the listed firing rules'
-    beta values sum to exactly the gold's score.
-
-Usage (from repo root):
-    python scripts/verify_score_identity.py --data_path data/umls \\
-        --counts outputs/additive_umls_aggregation_2x2/analysis/counts_valid.pt
+Usage:
+    python scripts/verify_score_identity.py --data_path data/<ds> \\
+        --counts outputs/<ds>/rq/counts_valid.pt
 """
 
 import argparse
@@ -102,8 +79,8 @@ def build_model(graph, rules, beta, device, cfg=None):
     gids = model.rule_features[:, 0].long()
     w = torch.nan_to_num(beta[gids], nan=0.0)
     model.register_buffer("rule_weight_logit", w.to(device).clone())
-    model.simple_aggregation = True
-    model.paper_sum = True
+    model.conf_count = True
+    model.conf_binary = True
     model.use_bias = False
     model.bias.requires_grad_(False)
     model.eval()
@@ -124,7 +101,7 @@ def main():
     p.add_argument("--data_path", default="data/umls")
     p.add_argument("--rule_file", default=None)
     p.add_argument("--config", default=None,
-                   help="Run config json (umls_hpc.json etc.) for model dims, so "
+                   help="Run config json (umls_config.json etc.) for model dims, so "
                         "this builds on any dataset. Under --logreg_binary the "
                         "dims do not affect the checked score.")
     p.add_argument("--counts",
@@ -216,12 +193,9 @@ def main():
         max_d_a = max(max_d_a, float((score.double() - ref_a).abs().max()))
         max_d_b = max(max_d_b, float((score.double() - ref_b).abs().max()))
 
-        # Ranking agreement. Binary rule scores tie heavily (many entities share
-        # a score; unreached ones all sit at 0), and argsort breaks ties by
-        # index, so demanding an identical permutation would flag float noise of
-        # ~1e-6 reordering two genuinely equal entities. The meaningful claim is
-        # that no STRICTLY ordered pair is inverted: read the reference scores in
-        # the model's order and they must be non-increasing up to tol.
+        # Ranking agreement: binary scores tie heavily, so check no strictly
+        # ordered pair is inverted (reference scores in the model's order must be
+        # non-increasing up to tol), not an identical permutation.
         for i in range(len(qs)):
             order = score[i].argsort(descending=True)
             walk = ref_a[i][order]

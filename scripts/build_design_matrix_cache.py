@@ -1,26 +1,12 @@
 #!/usr/bin/env python3
-"""
-Rebuild and CACHE the leave-one-out logistic-regression design matrix.
+"""Rebuild and cache the leave-one-out logreg design matrix as design_matrix.pt.
 
-rule_logreg_train.py builds this matrix, fits beta, then discards the matrix.
-The interpretability analyses (collinearity, bootstrap stability) need the exact
-firing matrix the betas were fit on. Because build_design_matrix is deterministic
-given (data, rules), rebuilding it locally reproduces that matrix EXACTLY -- this
-script rebuilds it, verifies a refit reproduces the saved beta (a parity gate),
-and caches the sparse matrix + per-rule meta to design_matrix.pt for reuse.
+Use it when rule_logreg_train.py was
+run without --design_cache.
 
-Small datasets (UMLS/Family, N~3k) build fine on CPU in minutes. This is a
-one-time cost; the downstream analyses read the cache, not the graph.
-
-Outputs (in --out_dir, default = --logreg_dir):
-  design_matrix.pt   {rows, cols, y [nnz/M], M, R, support, gold_fired,
-                      head, length, meta}
-
-Usage (from repo root):
-    python scripts/build_design_matrix_cache.py \\
-        --data_path  data/family \\
-        --rule_file  data/family/mined_rules.txt \\
-        --logreg_dir outputs/additive_family/logreg-family
+Usage:
+    python scripts/build_design_matrix_cache.py --data_path data/<ds> \\
+        --rule_file data/<ds>/mined_rules.txt --logreg_dir outputs/<ds>/rq
 """
 
 import argparse

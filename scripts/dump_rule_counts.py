@@ -1,40 +1,14 @@
 #!/usr/bin/env python3
-"""
-Dump per-(query, rule, entity) raw integer counts for UMLS (valid + test splits).
+"""Dump per-(query, rule, entity) raw integer path counts for valid + test.
 
-One grounding pass over the frozen pretrain embeddings; no variant-specific weights
-needed. Outputs are fully variant-agnostic: binary-vs-raw and keep-vs-clamp scoring
-all derive from these counts + rule_meta.pt offline.
+One grounding pass over the frozen pretrain embeddings. Writes
+counts_{valid,test}.pt and rule_meta.pt; --dump_kge adds
+kge_{valid,test}.pt.
 
-Does NOT import data.py (which requires torch_scatter), so this script runs
-locally with a standard PyTorch installation. Grounding is reimplemented using
-torch.scatter_add_ (pure PyTorch).
-
-Outputs (torch.save) under --out_dir
-(default outputs/additive_umls_aggregation_2x2/analysis/):
-
-  counts_valid.pt  / counts_test.pt
-    query_h  : LongTensor [Q]
-    query_r  : LongTensor [Q]
-    query_gold: LongTensor [Q]
-    q_ptr    : LongTensor [Q+1]   CSR row-pointer into rule_id/ent/cnt
-    rule_id  : LongTensor [nnz]   global rule index (0..num_rules-1)
-    ent      : LongTensor [nnz]   entity index
-    cnt      : ShortTensor [nnz]  raw path count (int16, capped at 32767)
-
-  rule_meta.pt
-    head          : LongTensor [R]
-    length        : LongTensor [R]      body length
-    w_R_unclamped : FloatTensor [R]     gamma_rule - ||body_emb - head_emb||
-    bodies        : list of lists[int]  (variable length, not padded)
-
-Usage (run from repo root):
-    python scripts/dump_rule_counts.py \\
-        --checkpoint outputs/additive_umls_paper_sum_clamp/grounding.pt \\
-        --config     outputs/additive_umls_paper_sum_clamp/config.json \\
-        --data_path  data/umls \\
-        --rule_file  data/umls/mined_rules.txt \\
-        --out_dir    outputs/additive_umls_aggregation_2x2/analysis
+Usage:
+    python scripts/dump_rule_counts.py --checkpoint <grounding.pt> \\
+        --config <config.json> --data_path data/<ds> \\
+        --rule_file data/<ds>/mined_rules.txt --out_dir outputs/<ds>/rq --dump_kge
 """
 
 import argparse
@@ -47,10 +21,7 @@ from collections import defaultdict
 import torch
 import torch.nn as nn
 
-# ---------------------------------------------------------------------------
-# Bootstrap: add src_additive to sys.path for model.py + layers.py only.
-# We do NOT import data.py because it requires torch_scatter.
-# ---------------------------------------------------------------------------
+# src_additive on sys.path for model.py + layers.py only (not data.py: torch_scatter).
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT  = os.path.normpath(os.path.join(_SCRIPT_DIR, ".."))
 _SRC_DIR    = os.path.join(_REPO_ROOT, "src_additive")
@@ -61,11 +32,7 @@ import model as _model_mod          # noqa: E402  (model.py, no torch_scatter)
 RulE = _model_mod.RulE
 
 
-# ---------------------------------------------------------------------------
-# Minimal graph: reads triples from files, builds CSR adjacency without
-# torch_scatter (uses pure Python lists + torch.scatter_add_).
-# ---------------------------------------------------------------------------
-
+# Minimal graph: CSR adjacency from the triple files, no torch_scatter.
 class MinimalGraph:
     """Reads KG files; provides .grounding() without torch_scatter."""
 
@@ -137,15 +104,7 @@ class MinimalGraph:
             self.relation2adjacency.append((src, dst))
 
     def propagate(self, x: torch.Tensor, relation: int) -> torch.Tensor:
-        """Single-hop message passing (no edge removal).
-
-        x: [N, B] integer counts (source state)
-        Returns updated [N, B].
-
-        Replaces data.KnowledgeGraph.propagate (which uses torch_scatter)
-        with torch.scatter_add_ (standard PyTorch). Device-aware: the adjacency
-        tensors follow x's device so this runs unchanged on CPU or CUDA.
-        """
+        """Single-hop message passing over `relation`: [N, B] counts -> [N, B]."""
         src, dst = self.relation2adjacency[relation]
         if src.numel() == 0:
             return torch.zeros_like(x)
@@ -162,12 +121,8 @@ class MinimalGraph:
 
     def grounding(self, h: torch.Tensor, r_head: int,
                   r_body: list, edges_to_remove=None) -> torch.Tensor:
-        """Ground a single rule body from all heads in h.
-
-        h: [B] head entity indices (device determines where grounding runs).
-        Returns [B, N] integer count tensor (paths from each h to each entity).
-        edges_to_remove: ignored (always None in eval / dump context).
-        """
+        """Ground rule body `r_body` from heads h [B] -> [B, N] path counts
+        (edges_to_remove ignored in the dump context)."""
         N = self.entity_size
         B = h.size(0)
         x = torch.zeros(N, B, dtype=torch.long, device=h.device)
@@ -182,16 +137,8 @@ class MinimalGraph:
 # ---------------------------------------------------------------------------
 
 def load_rules(rule_file: str, num_relations: int):
-    """Returns list of [global_id, r_head, b1, b2, ...] (no padding).
-
-    global_id is a sequential counter over kept rules (lines with >= 2 tokens),
-    NOT the raw file line number. This MUST match src_additive/data.py
-    RuleDataset, which skips len<=1 lines and assigns the same sequential idx to
-    rule_features[:, 0]. If a rule file has skipped lines (e.g. WN18RR has 4
-    single-token lines), using the line number here would mis-align the
-    rule_precision.pt weights against the model's rules and overflow the
-    per-rule arrays in rule_precision_train.compute_precision.
-    """
+    """List of [global_id, r_head, b1, b2, ...]; global_id is a sequential counter
+    over kept lines (>=2 tokens), matching src_additive/data.py RuleDataset."""
     rules = []
     gid = 0
     with open(rule_file) as f:
@@ -258,16 +205,8 @@ def compute_unclamped_weights(model, device: torch.device) -> torch.Tensor:
 
 def dump_split(model, graph: MinimalGraph, split_name: str,
                device: torch.device, chunk: int = 0) -> dict:
-    """Ground every query in split_name; return CSR count structure.
-
-    Grounding runs on `device` (CPU or CUDA). Firing extraction is fully
-    VECTORIZED -- a single counts.nonzero() per (rule, query-block) instead of a
-    Python per-query loop -- so GPU grounding is not throttled by host<->device
-    syncs (one .cpu() per rule-block, not per query). `chunk` caps how many
-    queries of a relation are grounded at once, bounding the [B, N] count tensor
-    (0 = all queries of the relation in one block; fine for small N like UMLS,
-    but set e.g. 512 for WN18RR/FB15k).
-    """
+    """Ground every query in split_name -> CSR count structure. `chunk` caps how
+    many queries of a relation are grounded at once (0 = all; use ~512 for WN18RR/FB15k)."""
     facts = getattr(graph, f"{split_name}_facts")   # list of (h, r, t)
     Q = len(facts)
     query_h    = torch.tensor([h for h, _, _ in facts], dtype=torch.long)
@@ -348,14 +287,9 @@ def dump_split(model, graph: MinimalGraph, split_name: str,
 
 def dump_kge(model, graph: MinimalGraph, split_name: str,
              device: torch.device, chunk: int = 256) -> dict:
-    """Dump the frozen KGE (RotatE) score of every entity for every query.
-
-    Returns {'query_h','query_r','query_gold','kge'} where kge is a [Q, N]
-    float16 tensor. The score is independent of rules / weights / alpha, so it
-    is dumped once and reused across the whole (L2 x alpha) sweep in
-    scripts/select_logreg.py. Row order matches counts_<split>.pt exactly (both
-    iterate getattr(graph, '<split>_facts') in order).
-    """
+    """Dump the frozen RotatE score of every entity for every query ->
+    {'query_h','query_r','query_gold','kge'} with kge [Q, N] float16. Row order
+    matches counts_<split>.pt."""
     facts = getattr(graph, f"{split_name}_facts")
     Q = len(facts)
     N = graph.entity_size
@@ -390,9 +324,9 @@ def parse_args():
     p = argparse.ArgumentParser(
         description="Dump per-(query, rule, entity) counts for UMLS.")
     p.add_argument("--checkpoint",
-                   default="outputs/additive_umls_paper_sum_clamp/grounding.pt")
+                   default="outputs/additive_umls_conf_binary_clamp/grounding.pt")
     p.add_argument("--config",
-                   default="outputs/additive_umls_paper_sum_clamp/config.json")
+                   default="outputs/additive_umls_conf_binary_clamp/config.json")
     p.add_argument("--data_path",  default="data/umls")
     p.add_argument("--rule_file",  default="data/umls/mined_rules.txt")
     p.add_argument("--out_dir",

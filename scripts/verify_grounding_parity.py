@@ -1,44 +1,16 @@
 #!/usr/bin/env python3
-"""
-Assert that the OFFLINE grounding stack agrees with the REAL in-model KG.
+"""Assert the offline grounding stack agrees with the real in-model KG.
 
-The offline aggregators (rule_logreg_train.py, rule_precision*_train.py,
-dump_rule_counts.py) never touch src_additive/data.py -- they reimplement the
-graph (MinimalGraph) and message passing with torch.scatter_add_ so they can run
-without torch_scatter. That reimplementation is load-bearing: every beta, every
-precision, every dumped count comes out of it. If it disagrees with
-data.KnowledgeGraph.grounding by so much as an orientation flip, the learned
-weights are fitted against a graph the model never sees, and nothing downstream
-would notice.
+The offline aggregators (rule_logreg_train.py, rule_precision_train.py,
+dump_rule_counts.py) reimplement the graph as MinimalGraph with torch.scatter_add_
+so they run without torch_scatter. This
+imports the real data.KnowledgeGraph and checks, on sampled forward and inverse
+head relations, exact integer path-count equality for graph parity, rule
+alignment (rule_features[:, 0] vs load_rules order), plain grounding, and
+leave-one-out grounding. All mismatches are fatal.
 
-This script imports the REAL data.KnowledgeGraph (torch_scatter and all) and
-compares it against MinimalGraph + the offline ground() on identical inputs.
-It compares INTEGER PATH COUNTS, not binarized firing: count equality is
-strictly stronger, and it is what catches an orientation flip on a symmetric
-neighbourhood or a multi-edge miscount that binarization would hide.
-
-Checks (all fatal):
-  0. graph parity      -- entity/relation sizes, per-relation directed edge
-                          multisets, hr2o vs build_gold.
-  1. rule alignment    -- rule bodies at rule_features[:, 0] vs load_rules order.
-                          The `beta.size(0) != R` guard in trainer.py catches a
-                          COUNT mismatch; a shifted rule id (one file skipping a
-                          line the other keeps) has the same count and passes
-                          silently, mapping every beta onto the wrong rule.
-  2. grounding parity  -- graph.grounding(all_h, r_head, r_body, None) vs
-                          MinimalGraph.grounding vs offline ground(), exact
-                          int64 equality of the [B, N] count tensors.
-  3. LOO parity        -- graph.grounding(..., edges_to_remove) (edge ids via
-                          relation2ht2index, exactly as TrainDataset builds them)
-                          vs offline ground(..., r_query=r, drop_dst=T).
-
-Both forward (r < NR) and inverse (r >= NR) head relations are sampled, because
-an orientation flip is invisible on a relation whose adjacency is symmetric.
-
-Usage (from repo root):
-    python scripts/verify_grounding_parity.py --data_path data/umls
-    python scripts/verify_grounding_parity.py --data_path data/wn18rr \\
-        --num_relations 4 --max_heads 32 --max_rules 50
+Usage:
+    python scripts/verify_grounding_parity.py --data_path data/<ds>
 """
 
 import argparse

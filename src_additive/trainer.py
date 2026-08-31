@@ -398,23 +398,10 @@ class GroundTrainer(object):
         self.model.relation_embedding.weight.requires_grad = False
         self.model.rule_emb.weight.requires_grad = False
 
-        # === Interpretable additive aggregation: per-rule weight setup ===
-        # w_R is warm-started from the raw RulE confidence (gamma_rule - d, Eq. 6)
-        # and stored as a frozen buffer -- NO sigmoid -- so the additive score
-        # matches the paper's "sum (w/o MLP)" baseline exactly.
+        # Additive aggregation: set the frozen per-rule weight buffer
         if getattr(args, 'logreg_binary', False):
-            # === Learned logistic-regression x binary aggregation ===
-            # Per-rule weight = logistic-regression coefficient beta_R (from
-            # rule_logreg.pt), fitted by BCE on a leave-one-out train design
-            # matrix. Same in-model score form as --precision_binary --
-            # binary activation, no per-entity bias -- but with LEARNED weights
-            # instead of frozen PCA precision:
-            #     score(t) = sum_R beta_R * 1[rule R fired h->t].
-            # The fitted intercept b is a constant added to every candidate tail
-            # within a query, so it does NOT change the per-query ranking; it is
-            # therefore omitted here (use_bias=False) exactly like the precision
-            # baseline. beta can be negative (a rule that fires predominantly on
-            # non-answers), which is fine for an additive score.
+            # Per-rule weight = fitted logreg coefficient beta_R (rule_logreg.pt);
+            # binary activation, no bias (intercept is rank-invariant).
             logreg_file = getattr(args, 'logreg_file', None)
             if logreg_file is None:
                 raise ValueError(
@@ -431,9 +418,7 @@ class GroundTrainer(object):
                     'rule_logreg.pt has %d entries but the model has %d rules. '
                     'Ensure both come from the same dataset/rule_file.'
                     % (beta.size(0), R))
-            # Align beta to model rule rows via the global rule id stored in
-            # rule_features[:, 0]; NaN (should not occur -- unfired rules get
-            # beta 0 during the fit) -> 0.0 for safety.
+            # Align beta to model rule rows via global rule id (rule_features[:, 0]); NaN -> 0.
             gids = self.model.rule_features[:, 0].long().to(beta.device)
             w = torch.nan_to_num(beta[gids], nan=0.0)
             intercept = float(lr_data.get('intercept',
@@ -442,8 +427,8 @@ class GroundTrainer(object):
             n_neg = int((w < 0).sum().item())
             self.model.register_buffer('rule_weight_logit',
                                        w.to(self.device).clone())
-            self.model.simple_aggregation = True
-            self.model.paper_sum = True          # binary activation
+            self.model.conf_count = True
+            self.model.conf_binary = True          # binary activation
             self.model.use_bias = False          # intercept omitted (rank-invariant)
             self.model.bias.requires_grad_(False)
             logging.info('[logreg_binary] ENABLED: binary activation, no bias, '
@@ -451,13 +436,8 @@ class GroundTrainer(object):
                          '(pos:%d neg:%d /%d, intercept=%.4f omitted from ranking).'
                          % (n_pos, n_neg, R, intercept))
         elif getattr(args, 'precision_binary', False):
-            # === Precision x binary aggregation ===
-            # Per-rule weight = empirical train PCA precision (from
-            # rule_precision.pt) instead of the frozen RulE confidence. Binary
-            # activation (paper_sum) and no bias, so the score is
-            # sum_R precision_R * 1[rule R fired on t]. Precision is in [0, 1],
-            # so no clamping is needed. This mirrors the offline scorer
-            # score_counts_offline.py --weight_source precision.
+            # Per-rule weight = train PCA precision (rule_precision.pt);
+            # binary activation, no bias.
             precision_file = getattr(args, 'precision_file', None)
             if precision_file is None:
                 raise ValueError(
@@ -474,24 +454,21 @@ class GroundTrainer(object):
                     'rule_precision.pt has %d entries but the model has %d rules. '
                     'Ensure both come from the same dataset/rule_file.'
                     % (precision.size(0), R))
-            # Align precision to model rule rows via the global rule id stored in
-            # rule_features[:, 0]; NaN (rules that never fired from a known
-            # subject) -> 0.0 so they contribute nothing, matching the offline
-            # scorer.
+            # Align precision to model rule rows via global rule id (rule_features[:, 0]); NaN -> 0.
             gids = self.model.rule_features[:, 0].long().to(precision.device)
             w = torch.nan_to_num(precision[gids], nan=0.0)
             n_nan = int(torch.isnan(precision[gids]).sum().item())
             n_pos = int((w > 0).sum().item())
             self.model.register_buffer('rule_weight_logit',
                                        w.to(self.device).clone())
-            self.model.simple_aggregation = True
-            self.model.paper_sum = True          # binary activation
+            self.model.conf_count = True
+            self.model.conf_binary = True          # binary activation
             self.model.use_bias = False          # purely rule-based
             self.model.bias.requires_grad_(False)
             logging.info('[precision_binary] ENABLED: binary activation, no bias, '
                          'per-rule precision weights '
                          '(rules>0: %d/%d, nan->0: %d).' % (n_pos, R, n_nan))
-        elif getattr(args, 'simple_aggregation', False):
+        elif getattr(args, 'conf_count', False):
             rule_features = self.model.rule_features.to(self.device)
             rule_masks = self.model.rule_masks.to(self.device)
             batch = 128
@@ -511,17 +488,15 @@ class GroundTrainer(object):
                 logging.info('[clamp] zeroed %d/%d negative-confidence rules '
                              '(w_R = max(0, w_R)).' % (n_neg, init_logits.numel()))
             self.model.register_buffer('rule_weight_logit', init_logits.clone())
-            self.model.simple_aggregation = True
-            self.model.paper_sum = getattr(args, 'paper_sum', False)
-            # Bias is dropped under --paper_sum (faithful paper sum) or --no_bias
-            # (counts, purely rule-based). In either case freeze it so it picks up
-            # no gradient signal and stays at its init value.
-            self.model.use_bias = not (self.model.paper_sum
+            self.model.conf_count = True
+            self.model.conf_binary = getattr(args, 'conf_binary', False)
+            # --conf_binary / --no_bias drop the bias; freeze it either way.
+            self.model.use_bias = not (self.model.conf_binary
                                        or getattr(args, 'no_bias', False))
             if not self.model.use_bias:
                 self.model.bias.requires_grad_(False)
-            if self.model.paper_sum:
-                logging.info('[paper_sum] faithful paper sum ENABLED: binary activation, '
+            if self.model.conf_binary:
+                logging.info('[conf_binary] faithful paper sum ENABLED: binary activation, '
                              'no bias, raw frozen RulE confidence.')
             elif not self.model.use_bias:
                 logging.info('[additive] simple aggregation, NO bias (raw counts, '
@@ -539,10 +514,8 @@ class GroundTrainer(object):
         
         train_dataloader = DataLoader(self.train_set, 1, num_workers=self.num_worker)
 
-        # rules_weight_emb (the per-dim MLP rule message) is only consumed by the
-        # original MLP forward path. The additive/paper_sum path returns before
-        # touching it, so skip this precompute there.
-        if not getattr(self.model, 'simple_aggregation', False):
+        # rules_weight_emb is only used by the MLP path; skip it for additive.
+        if not getattr(self.model, 'conf_count', False):
             self.model.eval_compute_rule_weight(self.device)
 
         logging.info('>>>>> RulE: Grounding-Training')
@@ -568,11 +541,8 @@ class GroundTrainer(object):
         logging.info('| Best Valid MRR (model selection): {:.6f}'.format(test_mrr))
         logging.info('-------------------------')
 
-        # Reload best-valid checkpoint so final eval reflects the selected model.
-        # grounding.pt is only written when valid MRR improves over the initial
-        # 0.0, so it may be missing if no iteration ever improved (e.g. a fully
-        # frozen paper_sum run where no rule fires). Fall back to the current
-        # in-memory model in that case.
+        # Reload best-valid checkpoint for final eval; fall back to the current
+        # model if it was never written (valid MRR never improved).
         best_ckpt = os.path.join(self.args.save_path, 'grounding.pt')
         if os.path.exists(best_ckpt):
             checkpoint = torch.load(best_ckpt)
@@ -633,12 +603,8 @@ class GroundTrainer(object):
                 
                 loss = -(rule_logits[mask] * target[mask]).sum() / torch.clamp(target[mask].sum(), min=1)
 
-                # Under --paper_sum every term in the grounding score is a frozen
-                # buffer or a no_grad grounding constant, so `loss` has no
-                # grad_fn and backward() would raise. Skip the optimisation step
-                # in that case. NOTE: loss.requires_grad tests reachability, which
-                # is the correct check (requires_grad on a parameter alone does
-                # not guarantee the parameter appears in the loss graph).
+                # Fully frozen scorers (--conf_binary etc.) give a loss with no
+                # grad_fn; skip the optimisation step in that case.
                 if loss.requires_grad:
                     loss.backward()
 
@@ -653,10 +619,7 @@ class GroundTrainer(object):
                 
                 total_loss = 0.0
                 total_size = 0.0
-                # Intentionally NOT checkpointing here: grounding.pt is written
-                # only on a best-valid improvement in train(), so the model
-                # reloaded for the final test/test_kge eval is the best-valid one
-                # rather than whatever mid-epoch state was saved last.
+                # No checkpoint here: grounding.pt is written only on best-valid.
         
 
     @torch.no_grad()
@@ -729,7 +692,6 @@ class GroundTrainer(object):
         for h, r, t, L, H in ranks.data.cpu().numpy().tolist():
             query2LH[(h, r, t)] = (L, H)
 
-        # Per-query rank dump (h, r, t, L, H) for offline rank-win comparison.
         if getattr(self.args, 'dump_ranks', False):
             self._dump_ranks(split, query2LH)
 
@@ -775,11 +737,7 @@ class GroundTrainer(object):
 
 
     def _dump_ranks(self, split, query2LH):
-        """Write per-query filtered ranks to ranks_<split>.csv in save_path.
-
-        Columns: h, r, t, L, H. Rank = (L + H - 1) / 2 is the standard
-        mid-point for tie bands; downstream comparison recomputes it.
-        """
+        """Write per-query filtered ranks (h, r, t, L, H) to ranks_<split>.csv."""
         import csv
         out_path = os.path.join(self.args.save_path, 'ranks_%s.csv' % split)
         with open(out_path, 'w', newline='') as fh:

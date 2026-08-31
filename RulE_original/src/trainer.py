@@ -601,10 +601,6 @@ class GroundTrainer(object):
         for h, r, t, L, H in ranks.data.cpu().numpy().tolist():
             query2LH[(h, r, t)] = (L, H)
 
-        # Per-query rank dump (h, r, t, L, H) for offline rank-win comparison.
-        if getattr(self.args, 'dump_ranks', False):
-            self._dump_ranks(split, query2LH)
-
         hit1, hit3, hit10, mr, mrr = 0.0, 0.0, 0.0, 0.0, 0.0
         for (L, H) in query2LH.values():
             if expectation:
@@ -644,51 +640,6 @@ class GroundTrainer(object):
     
         
         return mrr
-
-
-    def _dump_ranks(self, split, query2LH):
-        """Write per-query filtered ranks to ranks_mlp_<split>.csv in save_path.
-
-        Columns: h, r, t, L, H. Rank = (L + H - 1) / 2 is the standard mid-point
-        for tie bands; downstream comparison recomputes it. The 'mlp' tag marks
-        these as the original RulE MLP-head ranks (vs the additive ranks_*.csv).
-        """
-        import csv
-        out_path = os.path.join(self.args.save_path, 'ranks_mlp_%s.csv' % split)
-        with open(out_path, 'w', newline='') as fh:
-            writer = csv.writer(fh)
-            writer.writerow(['h', 'r', 't', 'L', 'H'])
-            for (h, r, t), (L, H) in query2LH.items():
-                writer.writerow([h, r, t, L, H])
-        logging.info('[dump_ranks] wrote %s (%d queries)'
-                     % (out_path, len(query2LH)))
-
-
-    def eval_and_dump(self, args):
-        """Eval-only path: load a trained grounding.pt and dump per-query ranks.
-
-        Reuses the trained MLP grounding checkpoint (no retraining). Mirrors the
-        final-eval block of train(): load state, precompute rules_weight_emb,
-        then evaluate valid and test (rule-only). With args.dump_ranks set, each
-        evaluate() writes ranks_mlp_<split>.csv.
-        """
-        ckpt_path = getattr(args, 'grounding_checkpoint', None)
-        if ckpt_path is None:
-            raise ValueError(
-                '--eval_only requires --grounding_checkpoint pointing at a trained '
-                'grounding.pt.')
-        logging.info('[eval_only] loading grounding checkpoint from %s' % ckpt_path)
-        checkpoint = torch.load(ckpt_path, map_location=self.device)
-        state = checkpoint['model'] if 'model' in checkpoint else checkpoint
-        self.model.load_state_dict(state, strict=False)
-
-        # rules_weight_emb is consumed by the MLP forward path; recompute it from
-        # the loaded rule/relation embeddings (same as train(), line ~413).
-        self.model.eval_compute_rule_weight(self.device)
-
-        logging.info('>>>>> RulE: Eval-only rank dump')
-        self.evaluate('valid', args.alpha, expectation=True)
-        self.evaluate('test', args.alpha, expectation=True)
 
 
     @torch.no_grad()
