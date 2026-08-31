@@ -204,3 +204,4 @@ __marimo__/
 rule_env/
 outputs/
 ignore/
+.DS_Store
